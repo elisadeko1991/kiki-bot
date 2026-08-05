@@ -3,6 +3,8 @@ const { Client, GatewayIntentBits, Partials } = require('discord.js');
 const { askClaude } = require('./claude');
 const { getClientByDiscordChannel } = require('../config/clients');
 const { appendNoteToPlaybook } = require('./memoryWriter');
+const { fetchAllPayments } = require('./payraClient');
+const { appendNewPayments } = require('./googleSheets');
 
 const historyByChannel = new Map();
 const MAX_TURNS = 20;
@@ -66,6 +68,28 @@ function start() {
       } catch (err) {
         console.error('[discord] !remember failed:', err.message);
         await message.reply("Couldn't save that — " + err.message);
+      }
+      return;
+    }
+
+    if (contentWithoutMention.toLowerCase().startsWith('!sync-payments')) {
+      if (message.author.id !== process.env.ELISA_DISCORD_USER_ID) {
+        await message.reply("Only Elisa can run a payment sync.");
+        return;
+      }
+
+      await message.reply('Pulling all payments from Payra — this may take a bit for large histories...');
+
+      try {
+        const payments = await fetchAllPayments();
+        const result = await appendNewPayments(payments);
+        await message.reply(
+          'Done. Fetched ' + result.totalFetched + ' payments from Payra — '
+          + 'added ' + result.added + ' new rows, skipped ' + result.skippedDuplicates + ' already in the sheet.'
+        );
+      } catch (err) {
+        console.error('[discord] !sync-payments failed:', err.message);
+        await message.reply("Sync failed — " + err.message);
       }
       return;
     }
