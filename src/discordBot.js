@@ -78,13 +78,15 @@ function start() {
         return;
       }
 
-      await message.reply('Pulling all payments from Payra — this may take a bit for large histories...');
+      await message.reply('Pulling all payments from Payra in batches (spaced out to avoid rate limits — this will take a while for large histories, I\'ll post progress as I go)...');
 
       try {
-        const payments = await fetchAllPayments();
+        const payments = await fetchAllPayments(async (page, recordsThisPage, totalSoFar) => {
+          await message.channel.send('Batch ' + page + ': +' + recordsThisPage + ' records (running total: ' + totalSoFar + '). Waiting before next batch...');
+        });
         const result = await appendNewPayments(payments);
         await message.reply(
-          'Done. Fetched ' + result.totalFetched + ' payments from Payra — '
+          'All done. Fetched ' + result.totalFetched + ' payments from Payra total — '
           + 'added ' + result.added + ' new rows, skipped ' + result.skippedDuplicates + ' already in the sheet.'
         );
       } catch (err) {

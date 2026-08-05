@@ -1,6 +1,12 @@
 require('dotenv').config();
 
-async function fetchAllPayments() {
+const PAGE_DELAY_MS = 150000;
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function fetchAllPayments(onProgress) {
   const baseUrl = process.env.PAYRA_API_URL;
   const token = process.env.PAYRA_API_TOKEN;
 
@@ -44,6 +50,14 @@ async function fetchAllPayments() {
       allRecords.push(records[i]);
     }
 
+    if (onProgress) {
+      try {
+        await onProgress(page, records.length, allRecords.length);
+      } catch (progressErr) {
+        console.error('[payra] onProgress callback error (non-fatal):', progressErr.message);
+      }
+    }
+
     const nextCursor = data.next_updated_after;
 
     if (records.length === 0 || !nextCursor || nextCursor === previousCursor) {
@@ -52,6 +66,9 @@ async function fetchAllPayments() {
 
     previousCursor = cursor;
     cursor = nextCursor;
+
+    console.log('[payra] Waiting ' + (PAGE_DELAY_MS / 1000) + 's before next page...');
+    await wait(PAGE_DELAY_MS);
   }
 
   return allRecords;
