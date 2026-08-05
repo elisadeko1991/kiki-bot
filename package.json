@@ -1,0 +1,20 @@
+{
+  "name": "custom-ai-bot",
+  "version": "1.0.0",
+  "description": "Custom-branded AI agent for Slack and Discord, powered by the Claude API. One bot, per-client configs, per-client tool access.",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "start:slack": "node -e \"require('./src/slackBot').start()\"",
+    "start:discord": "node -e \"require('./src/discordBot').start()\""
+  },
+  "dependencies": {
+    "@slack/bolt": "^3.19.0",
+    "discord.js": "^14.15.3",
+    "dotenv": "^16.4.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
