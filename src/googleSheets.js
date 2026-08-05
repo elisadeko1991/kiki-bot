@@ -1,7 +1,7 @@
 require('dotenv').config();
 const { google } = require('googleapis');
 
-const SHEET_RANGE = 'A:M';
+const SHEET_RANGE = "'Successful Payments'!A:M"; // Payment ID, External ID, Type, Sub Type, Display Name, Last 4, Total, Tip, Tax, Fee, Paid On, Status, Transaction Type
 const HEADER_ROW = [
   'Payment ID',
   'External ID',
