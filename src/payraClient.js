@@ -9,7 +9,7 @@ async function fetchAllPayments() {
   }
 
   const allRecords = [];
-  let cursor = null;
+  let cursor = new Date(0).toISOString();
   let previousCursor = null;
   const MAX_PAGES = 500;
   let page = 0;
@@ -17,7 +17,7 @@ async function fetchAllPayments() {
   while (page < MAX_PAGES) {
     page = page + 1;
 
-    const url = cursor ? (baseUrl + '?updated_after=' + encodeURIComponent(cursor)) : baseUrl;
+    const url = baseUrl + '?updated_after=' + encodeURIComponent(cursor);
 
     console.log('[payra] Fetching page ' + page + ': ' + url);
 
