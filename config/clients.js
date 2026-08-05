@@ -40,7 +40,7 @@ Follow the hard rules and escalation policy in the reference material below exac
       // 'C0123ABCDEF',
     ],
     discordChannelIds: [
-      // '1526976343177170955',
+      '1526976343177170955',
     ],
 
     // Zapier + Make access — see .env.example for how tokens are generated.
