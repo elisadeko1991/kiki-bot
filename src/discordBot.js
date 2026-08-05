@@ -6,15 +6,22 @@ const { getClientByDiscordChannel } = require('../config/clients');
 const historyByChannel = new Map();
 const MAX_TURNS = 20;
 
-// Kept so other modules (like the webhook server) can send DMs through the
-// same running bot connection, instead of creating a second login.
 let discordClient = null;
 
 function appendHistory(channelId, role, content) {
   const history = historyByChannel.get(channelId) || [];
-  history.push({ role, content });
+  history.push({ role: role, content: content });
   historyByChannel.set(channelId, history.slice(-MAX_TURNS));
   return historyByChannel.get(channelId);
+}
+
+function splitMessage(text, limit) {
+  limit = limit || 1990;
+  const chunks = [];
+  for (let i = 0; i < text.length; i += limit) {
+    chunks.push(text.slice(i, i + limit));
+  }
+  return chunks.length ? chunks : [text];
 }
 
 function start() {
@@ -29,61 +36,49 @@ function start() {
 
   client.once('ready', () => {
     discordClient = client;
-    console.log(`âš¡ Discord bot (${client.user.tag}) is running`);
+    console.log('? Discord bot (' + client.user.tag + ') is running');
   });
 
   client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
 
     const clientConfig = getClientByDiscordChannel(message.channelId);
-    if (!clientConfig) return; // channel not mapped to a client yet
+    if (!clientConfig) return;
 
     const history = appendHistory(message.channelId, 'user', message.content);
 
     try {
       await message.channel.sendTyping();
-      const reply = await askClaude({ history, clientConfig });
+      const reply = await askClaude({ history: history, clientConfig: clientConfig });
       appendHistory(message.channelId, 'assistant', reply);
 
-      // Discord has a 2000-char message limit; split long replies.
-      for (const chunk of splitMessage(reply)) {
-        await message.reply(chunk);
+      const chunks = splitMessage(reply);
+      for (let i = 0; i < chunks.length; i++) {
+        await message.reply(chunks[i]);
       }
     } catch (err) {
-      console.error(`[discord] ${clientConfig.label} error:`, err.message);
-      await message.reply("Sorry, I ran into an error processing that â€” I've logged it.");
+      console.error('[discord] ' + clientConfig.label + ' error:', err.message);
+      await message.reply("Sorry, I ran into an error processing that — I've logged it.");
     }
   });
 
   client.login(process.env.DISCORD_BOT_TOKEN);
 }
 
-function splitMessage(text, limit = 1990) {
-  const chunks = [];
-  for (let i = 0; i < text.length; i += limit) {
-    chunks.push(text.slice(i, i + limit));
-  }
-  return chunks.length ? chunks : [text];
-}
-
-/**
- * Send a direct message to a specific Discord user. Used by the webhook
- * server to deliver real-time automation-failure alerts. Returns true/false
- * rather than throwing, so a bad webhook payload never crashes the server.
- */
 async function sendDirectMessage(userId, message) {
   if (!discordClient) {
-    console.error('[discord] Cannot send DM â€” bot is not ready yet.');
+    console.error('[discord] Cannot send DM — bot is not ready yet.');
     return false;
   }
   if (!userId) {
-    console.error('[discord] Cannot send DM â€” no target user ID configured.');
+    console.error('[discord] Cannot send DM — no target user ID configured.');
     return false;
   }
   try {
     const user = await discordClient.users.fetch(userId);
-    for (const chunk of splitMessage(message)) {
-      await user.send(chunk);
+    const chunks = splitMessage(message);
+    for (let i = 0; i < chunks.length; i++) {
+      await user.send(chunks[i]);
     }
     return true;
   } catch (err) {
@@ -92,4 +87,26 @@ async function sendDirectMessage(userId, message) {
   }
 }
 
-module.exports = { start, sendDirectMessage };
+async function sendChannelMessage(channelId, message) {
+  if (!discordClient) {
+    console.error('[discord] Cannot post to channel — bot is not ready yet.');
+    return false;
+  }
+  if (!channelId) {
+    console.error('[discord] Cannot post to channel — no channel ID configured.');
+    return false;
+  }
+  try {
+    const channel = await discordClient.channels.fetch(channelId);
+    const chunks = splitMessage(message);
+    for (let i = 0; i < chunks.length; i++) {
+      await channel.send(chunks[i]);
+    }
+    return true;
+  } catch (err) {
+    console.error('[discord] Failed to post to channel:', err.message);
+    return false;
+  }
+}
+
+module.exports = { start: start, sendDirectMessage: sendDirectMessage, sendChannelMessage: sendChannelMessage };
