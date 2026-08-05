@@ -9,7 +9,7 @@ async function fetchAllPayments() {
   }
 
   const allRecords = [];
-  let updatedAfter = '1970-01-01T00:00:00.000Z';
+  let cursor = null;
   let previousCursor = null;
   const MAX_PAGES = 500;
   let page = 0;
@@ -17,7 +17,9 @@ async function fetchAllPayments() {
   while (page < MAX_PAGES) {
     page = page + 1;
 
-    const url = baseUrl + '?updated_after=' + encodeURIComponent(updatedAfter);
+    const url = cursor ? (baseUrl + '?updated_after=' + encodeURIComponent(cursor)) : baseUrl;
+
+    console.log('[payra] Fetching page ' + page + ': ' + url);
 
     const response = await fetch(url, {
       method: 'GET',
@@ -29,11 +31,14 @@ async function fetchAllPayments() {
 
     if (!response.ok) {
       const errText = await response.text();
-      throw new Error('Payra API error ' + response.status + ': ' + errText);
+      console.error('[payra] Request failed. Status: ' + response.status + ' ' + response.statusText + '. Body: ' + errText + '. URL: ' + url);
+      throw new Error('Payra API error ' + response.status + ' (' + response.statusText + '): ' + errText);
     }
 
     const data = await response.json();
     const records = data.records || [];
+
+    console.log('[payra] Page ' + page + ' returned ' + records.length + ' records. records_matched=' + data.records_matched);
 
     for (let i = 0; i < records.length; i++) {
       allRecords.push(records[i]);
@@ -45,8 +50,8 @@ async function fetchAllPayments() {
       break;
     }
 
-    previousCursor = updatedAfter;
-    updatedAfter = nextCursor;
+    previousCursor = cursor;
+    cursor = nextCursor;
   }
 
   return allRecords;
