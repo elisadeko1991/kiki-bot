@@ -19,3 +19,11 @@ if (process.env.DISCORD_BOT_TOKEN) {
 } else {
   console.log('Skipping Discord bot — DISCORD_BOT_TOKEN not set.');
 }
+
+// The webhook server is what makes real-time failure alerts possible — it
+// needs Discord running (to send the DM) and a webhook secret configured.
+if (process.env.WEBHOOK_SECRET) {
+  require('./webhookServer').start();
+} else {
+  console.log('Skipping webhook server — WEBHOOK_SECRET not set (real-time alerts disabled until configured).');
+}

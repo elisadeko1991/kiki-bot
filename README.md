@@ -106,7 +106,83 @@ reference material, and it takes effect immediately (no retraining wait).
   and setting `knowledgeFile: 'clients/<name>/playbook.md'` in their config
   block.
 
+## Real-time failure alerts (Zapier/Make → instant DM)
+
+This is the actual "alert me in real time" piece — separate from the MCP
+tool access above, and more reliable for this specific job, since it's
+push-based instead of Kiki having to poll for errors.
+
+### How it works
+Kiki runs a small webhook endpoint (`/webhook/automation-error`). You
+configure one small Zap and one Make error handler to POST to it the
+moment something fails. Kiki DMs you immediately — no polling, no MCP
+limitations, no delay.
+
+### 1. Get your Discord user ID
+In Discord: User Settings → Advanced → enable **Developer Mode**. Then
+right-click your own name/profile anywhere → **Copy User ID**. Put this in
+`.env` / Railway as `ELISA_DISCORD_USER_ID`.
+
+### 2. Set a webhook secret
+Put any random string in `.env` / Railway as `WEBHOOK_SECRET` — this is
+yours to invent, not something Zapier/Make gives you. It's just there so
+random internet traffic can't trigger fake alerts. A password generator
+output works fine.
+
+### 3. Expose the webhook publicly on Railway
+1. Railway → your service → **Settings** → **Networking**
+2. Click **Generate Domain** — Railway gives you a public URL like
+   `https://kiki-bot-production.up.railway.app`
+3. Your webhook endpoint is that domain + `/webhook/automation-error`,
+   e.g. `https://kiki-bot-production.up.railway.app/webhook/automation-error`
+4. Test it's reachable: visit `<your-domain>/webhook/health` in a browser —
+   should show `{"status":"ok"}`
+
+### 4. Zapier — create the alert Zap
+1. New Zap → Trigger: search for **Zapier Manager** → event **New Zap Error**
+   (fires whenever any Zap you own errors)
+2. Action: **Webhooks by Zapier** → **POST**
+3. URL: your webhook endpoint from step 3
+4. Headers: add `x-webhook-secret` = the value you put in `WEBHOOK_SECRET`
+5. Data (JSON body):
+   ```json
+   {
+     "source": "zapier",
+     "automation": "{{zap_title}}",
+     "error": "{{error_message}}",
+     "timestamp": "{{error_time}}"
+   }
+   ```
+   (exact field names available depend on what Zapier Manager exposes —
+   check the test data it pulls in and map accordingly)
+6. Test the step, turn the Zap on
+
+### 5. Make — attach an error handler per scenario
+Make doesn't have one global "any scenario fails" trigger — error handling
+is per-scenario. For each scenario you want monitored:
+1. Open the scenario → right-click the module most likely to fail → **Add
+   error handler**
+2. Inside the error route, add a module: **HTTP → Make a request**
+3. URL: your webhook endpoint
+4. Method: POST, Headers: `x-webhook-secret` = your secret, Body type: JSON
+   ```json
+   {
+     "source": "make",
+     "automation": "<scenario name>",
+     "error": "{{error message from the bundle}}",
+     "timestamp": "{{now}}"
+   }
+   ```
+5. Save, make sure the scenario is active
+
+### 6. Test it for real
+Temporarily break something on purpose (bad test data, disconnect a
+connection briefly) to trigger a real error, and confirm the DM actually
+arrives. Don't skip this — untested alerting is worse than no alerting,
+since it creates false confidence.
+
 ## Hosting (simple options, cheapest first)
+
 
 Since neither bot needs an inbound public URL, you just need something that
 stays running 24/7 and can make outbound connections:
