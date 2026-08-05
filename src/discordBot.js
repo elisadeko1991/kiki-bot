@@ -2,6 +2,7 @@ require('dotenv').config();
 const { Client, GatewayIntentBits, Partials } = require('discord.js');
 const { askClaude } = require('./claude');
 const { getClientByDiscordChannel } = require('../config/clients');
+const { appendNoteToPlaybook } = require('./memoryWriter');
 
 const historyByChannel = new Map();
 const MAX_TURNS = 20;
@@ -44,6 +45,28 @@ function start() {
 
     const clientConfig = getClientByDiscordChannel(message.channelId);
     if (!clientConfig) return;
+
+    if (message.content.toLowerCase().startsWith('!remember ')) {
+      if (message.author.id !== process.env.ELISA_DISCORD_USER_ID) {
+        await message.reply("Only Elisa can add to my memory — flagging this request to her.");
+        return;
+      }
+
+      const note = message.content.slice('!remember '.length).trim();
+      if (!note) {
+        await message.reply('Usage: `!remember <what you want me to remember>`');
+        return;
+      }
+
+      try {
+        await appendNoteToPlaybook(clientConfig.knowledgeFile, note);
+        await message.reply('Got it — added to the playbook. Redeploying now, takes about a minute to take effect.');
+      } catch (err) {
+        console.error('[discord] !remember failed:', err.message);
+        await message.reply("Couldn't save that — " + err.message);
+      }
+      return;
+    }
 
     const history = appendHistory(message.channelId, 'user', message.content);
 
