@@ -103,3 +103,6 @@ this gets built.
 speed (leads reaching the CRM faster), reliability (fewer failed syncs), or
 something on the lead quality/routing side? Elisa can dig in once we know
 which.
+
+## Learned notes (added via !remember)
+- [2026-08-05 10:23] don't send messages privately. send them here in the channel if you identify any error with the automations
