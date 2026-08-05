@@ -46,13 +46,15 @@ function start() {
     const clientConfig = getClientByDiscordChannel(message.channelId);
     if (!clientConfig) return;
 
-    if (message.content.toLowerCase().startsWith('!remember ')) {
+    const contentWithoutMention = message.content.replace(/^<@!?\d+>\s*/, '').trim();
+
+    if (contentWithoutMention.toLowerCase().startsWith('!remember ')) {
       if (message.author.id !== process.env.ELISA_DISCORD_USER_ID) {
         await message.reply("Only Elisa can add to my memory — flagging this request to her.");
         return;
       }
 
-      const note = message.content.slice('!remember '.length).trim();
+      const note = contentWithoutMention.slice('!remember '.length).trim();
       if (!note) {
         await message.reply('Usage: `!remember <what you want me to remember>`');
         return;
