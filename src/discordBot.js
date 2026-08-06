@@ -126,7 +126,11 @@ function start() {
         return;
       }
 
-      await message.reply('Phase 1: pulling the last 30 days first, so recent payments show up fast...');
+      appendHistory(message.channelId, 'user', message.content);
+
+      const startMsg = 'Phase 1: pulling the last 30 days first, so recent payments show up fast...';
+      await message.reply(startMsg);
+      appendHistory(message.channelId, 'assistant', startMsg);
 
       try {
         let runningTotalFetched = 0;
@@ -140,12 +144,12 @@ function start() {
           const batchResult = await appendNewPayments(records);
           runningTotalAdded += batchResult.added;
           runningTotalSkipped += batchResult.skippedDuplicates;
-          await message.channel.send(
-            'Flush ' + flushCount + ': ' + records.length + ' records (~2 month window) — '
+          const flushMsg = 'Flush ' + flushCount + ': ' + records.length + ' records (~2 month window) — '
             + batchResult.added + ' new rows written, '
             + batchResult.skippedDuplicates + ' already existed. '
-            + '(Running total: ' + runningTotalFetched + ' fetched, ' + runningTotalAdded + ' written.)'
-          );
+            + '(Running total: ' + runningTotalFetched + ' fetched, ' + runningTotalAdded + ' written.)';
+          await message.channel.send(flushMsg);
+          appendHistory(message.channelId, 'assistant', flushMsg);
         };
 
         const recentBatcher = createDateWindowBatcher(WINDOW_DAYS, flushBatch);
@@ -158,7 +162,9 @@ function start() {
         await fetchAllPayments(recentHandler, thirtyDaysAgo);
         await recentBatcher.flushRemaining();
 
-        await message.channel.send('Phase 1 done — recent payments are in the sheet. Phase 2: starting full historical backfill, writing in ~2 month chunks as it goes...');
+        const phase2Msg = 'Phase 1 done — recent payments are in the sheet. Phase 2: starting full historical backfill, writing in ~2 month chunks as it goes...';
+        await message.channel.send(phase2Msg);
+        appendHistory(message.channelId, 'assistant', phase2Msg);
 
         const historicalBatcher = createDateWindowBatcher(WINDOW_DAYS, flushBatch);
         const historicalHandler = async (page, pageRecords, totalFetchedSoFar) => {
@@ -169,18 +175,32 @@ function start() {
         await fetchAllPayments(historicalHandler);
         await historicalBatcher.flushRemaining();
 
-        await message.reply(
-          'All done. Fetched ' + runningTotalFetched + ' payments from Payra total (across both phases) — '
-          + 'added ' + runningTotalAdded + ' new rows, skipped ' + runningTotalSkipped + ' duplicates.'
-        );
+        const doneMsg = 'All done. Fetched ' + runningTotalFetched + ' payments from Payra total (across both phases) — '
+          + 'added ' + runningTotalAdded + ' new rows, skipped ' + runningTotalSkipped + ' duplicates.';
+        await message.reply(doneMsg);
+        appendHistory(message.channelId, 'assistant', doneMsg);
       } catch (err) {
         console.error('[discord] !sync-payments failed:', err.message);
-        await message.reply("Sync failed — " + err.message + " (Any batches already written to the sheet before this error are safe — nothing to redo for those.)");
+        const failMsg = "Sync failed — " + err.message + " (Any batches already written to the sheet before this error are safe — nothing to redo for those.)";
+        await message.reply(failMsg);
+        appendHistory(message.channelId, 'assistant', failMsg);
       }
       return;
     }
 
     const history = appendHistory(message.channelId, 'user', message.content);
+
+    // If this message is a reply to an earlier one, pull the original in as
+    // context — otherwise "what's the update on this?" has nothing to point at.
+    if (message.reference) {
+      try {
+        const repliedTo = await message.fetchReference();
+        const quoted = 'Elisa is replying to this earlier message: "' + repliedTo.content + '"\n\nHer reply: ' + message.content;
+        history[history.length - 1] = { role: 'user', content: quoted };
+      } catch (err) {
+        console.error('[discord] Could not fetch replied-to message:', err.message);
+      }
+    }
 
     try {
       await message.channel.sendTyping();
