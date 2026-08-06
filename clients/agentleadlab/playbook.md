@@ -106,3 +106,4 @@ which.
 
 ## Learned notes (added via !remember)
 - [2026-08-05 10:23] don't send messages privately. send them here in the channel if you identify any error with the automations
+- [2026-08-06 11:29] Always refer to the thread convo before replying
