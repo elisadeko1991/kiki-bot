@@ -27,6 +27,54 @@ function splitMessage(text, limit) {
   return chunks.length ? chunks : [text];
 }
 
+/**
+ * Groups incoming records into ~windowDays-sized chunks (by payment date,
+ * not by API page) and flushes each chunk once the window is exceeded.
+ * This is separate from the API's own page size and the rate-limit delay
+ * between calls â€” this only controls how often we write to the sheet.
+ */
+function createDateWindowBatcher(windowDays, onFlush) {
+  let buffer = [];
+  let windowStartDate = null;
+
+  function getRecordDate(record) {
+    if (record.paid_on) return new Date(record.paid_on);
+    if (record.updated_at) return new Date(record.updated_at);
+    if (record.created_at) return new Date(record.created_at);
+    return new Date();
+  }
+
+  async function addRecords(records) {
+    for (let i = 0; i < records.length; i++) {
+      const record = records[i];
+      const recordDate = getRecordDate(record);
+
+      if (!windowStartDate) {
+        windowStartDate = recordDate;
+      }
+
+      const daysSinceWindowStart = Math.abs((recordDate - windowStartDate) / (1000 * 60 * 60 * 24));
+
+      if (daysSinceWindowStart >= windowDays && buffer.length > 0) {
+        await onFlush(buffer.slice());
+        buffer = [];
+        windowStartDate = recordDate;
+      }
+
+      buffer.push(record);
+    }
+  }
+
+  async function flushRemaining() {
+    if (buffer.length > 0) {
+      await onFlush(buffer.slice());
+      buffer = [];
+    }
+  }
+
+  return { addRecords: addRecords, flushRemaining: flushRemaining };
+}
+
 function start() {
   const client = new Client({
     intents: [
@@ -39,7 +87,7 @@ function start() {
 
   client.once('ready', () => {
     discordClient = client;
-    console.log('? Discord bot (' + client.user.tag + ') is running');
+    console.log('âš¡ Discord bot (' + client.user.tag + ') is running');
   });
 
   client.on('messageCreate', async (message) => {
@@ -52,7 +100,7 @@ function start() {
 
     if (contentWithoutMention.toLowerCase().startsWith('!remember ')) {
       if (message.author.id !== process.env.ELISA_DISCORD_USER_ID) {
-        await message.reply("Only Elisa can add to my memory — flagging this request to her.");
+        await message.reply("Only Elisa can add to my memory â€” flagging this request to her.");
         return;
       }
 
@@ -64,10 +112,10 @@ function start() {
 
       try {
         await appendNoteToPlaybook(clientConfig.knowledgeFile, note);
-        await message.reply('Got it — added to the playbook. Redeploying now, takes about a minute to take effect.');
+        await message.reply('Got it â€” added to the playbook. Redeploying now, takes about a minute to take effect.');
       } catch (err) {
         console.error('[discord] !remember failed:', err.message);
-        await message.reply("Couldn't save that — " + err.message);
+        await message.reply("Couldn't save that â€” " + err.message);
       }
       return;
     }
@@ -78,20 +126,56 @@ function start() {
         return;
       }
 
-      await message.reply('Pulling all payments from Payra in batches (spaced out to avoid rate limits — this will take a while for large histories, I\'ll post progress as I go)...');
+      await message.reply('Phase 1: pulling the last 30 days first, so recent payments show up fast...');
 
       try {
-        const payments = await fetchAllPayments(async (page, recordsThisPage, totalSoFar) => {
-          await message.channel.send('Batch ' + page + ': +' + recordsThisPage + ' records (running total: ' + totalSoFar + '). Waiting before next batch...');
-        });
-        const result = await appendNewPayments(payments);
+        let runningTotalFetched = 0;
+        let runningTotalAdded = 0;
+        let runningTotalSkipped = 0;
+        let flushCount = 0;
+        const WINDOW_DAYS = 60; // roughly 2 months
+
+        const flushBatch = async (records) => {
+          flushCount = flushCount + 1;
+          const batchResult = await appendNewPayments(records);
+          runningTotalAdded += batchResult.added;
+          runningTotalSkipped += batchResult.skippedDuplicates;
+          await message.channel.send(
+            'Flush ' + flushCount + ': ' + records.length + ' records (~2 month window) â€” '
+            + batchResult.added + ' new rows written, '
+            + batchResult.skippedDuplicates + ' already existed. '
+            + '(Running total: ' + runningTotalFetched + ' fetched, ' + runningTotalAdded + ' written.)'
+          );
+        };
+
+        const recentBatcher = createDateWindowBatcher(WINDOW_DAYS, flushBatch);
+        const recentHandler = async (page, pageRecords, totalFetchedSoFar) => {
+          runningTotalFetched += pageRecords.length;
+          await recentBatcher.addRecords(pageRecords);
+        };
+
+        const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+        await fetchAllPayments(recentHandler, thirtyDaysAgo);
+        await recentBatcher.flushRemaining();
+
+        await message.channel.send('Phase 1 done â€” recent payments are in the sheet. Phase 2: starting full historical backfill, writing in ~2 month chunks as it goes...');
+
+        const historicalBatcher = createDateWindowBatcher(WINDOW_DAYS, flushBatch);
+        const historicalHandler = async (page, pageRecords, totalFetchedSoFar) => {
+          runningTotalFetched += pageRecords.length;
+          await historicalBatcher.addRecords(pageRecords);
+        };
+
+        await fetchAllPayments(historicalHandler);
+        await historicalBatcher.flushRemaining();
+
         await message.reply(
-          'All done. Fetched ' + result.totalFetched + ' payments from Payra total — '
-          + 'added ' + result.added + ' new rows, skipped ' + result.skippedDuplicates + ' already in the sheet.'
+          'All done. Fetched ' + runningTotalFetched + ' payments from Payra total (across both phases) â€” '
+          + 'added ' + runningTotalAdded + ' new rows, skipped ' + runningTotalSkipped + ' duplicates.'
         );
       } catch (err) {
         console.error('[discord] !sync-payments failed:', err.message);
-        await message.reply("Sync failed — " + err.message);
+        await message.reply("Sync failed â€” " + err.message + " (Any batches already written to the sheet before this error are safe â€” nothing to redo for those.)");
       }
       return;
     }
@@ -109,7 +193,7 @@ function start() {
       }
     } catch (err) {
       console.error('[discord] ' + clientConfig.label + ' error:', err.message);
-      await message.reply("Sorry, I ran into an error processing that — I've logged it.");
+      await message.reply("Sorry, I ran into an error processing that â€” I've logged it.");
     }
   });
 
@@ -118,11 +202,11 @@ function start() {
 
 async function sendDirectMessage(userId, message) {
   if (!discordClient) {
-    console.error('[discord] Cannot send DM — bot is not ready yet.');
+    console.error('[discord] Cannot send DM â€” bot is not ready yet.');
     return false;
   }
   if (!userId) {
-    console.error('[discord] Cannot send DM — no target user ID configured.');
+    console.error('[discord] Cannot send DM â€” no target user ID configured.');
     return false;
   }
   try {
@@ -140,11 +224,11 @@ async function sendDirectMessage(userId, message) {
 
 async function sendChannelMessage(channelId, message) {
   if (!discordClient) {
-    console.error('[discord] Cannot post to channel — bot is not ready yet.');
+    console.error('[discord] Cannot post to channel â€” bot is not ready yet.');
     return false;
   }
   if (!channelId) {
-    console.error('[discord] Cannot post to channel — no channel ID configured.');
+    console.error('[discord] Cannot post to channel â€” no channel ID configured.');
     return false;
   }
   try {
