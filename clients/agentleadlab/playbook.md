@@ -108,3 +108,4 @@ which.
 - [2026-08-05 10:23] don't send messages privately. send them here in the channel if you identify any error with the automations
 - [2026-08-06 11:29] Always refer to the thread convo before replying
 - [2026-08-06 11:45] When asked about "sync payments" status right after the !sync-payments command was run, that's a question about Kiki's own Payra-to-Google-Sheets sync (built directly, no Zapier involved) — answer from what's already in the conversation (the Phase 1/Flush/All done messages), don't check the Zapier tool for it. Only use the Zapier tool if the question specifically mentions Zapier or a Zap by name — there are separate, unrelated Zapier automations that also touch Payra and Google Sheets, and those are a different thing from the !sync-payments command.
+- [2026-08-06 18:50] to respond only if you are tagged
