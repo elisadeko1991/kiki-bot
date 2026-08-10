@@ -192,14 +192,25 @@ function start() {
 
     // If this message is a reply to an earlier one, pull the original in as
     // context — otherwise "what's the update on this?" has nothing to point at.
+    let repliedToKiki = false;
     if (message.reference) {
       try {
         const repliedTo = await message.fetchReference();
+        repliedToKiki = discordClient && repliedTo.author.id === discordClient.user.id;
         const quoted = 'Elisa is replying to this earlier message: "' + repliedTo.content + '"\n\nHer reply: ' + message.content;
         history[history.length - 1] = { role: 'user', content: quoted };
       } catch (err) {
         console.error('[discord] Could not fetch replied-to message:', err.message);
       }
+    }
+
+    // Only actually respond if Kiki was tagged, or this is a direct reply to
+    // one of Kiki's own messages. Otherwise, stay silent but keep the message
+    // in history above — so Kiki still has full context for when it IS asked
+    // something, without replying to every unrelated conversation in the channel.
+    const wasMentioned = discordClient && message.mentions.users.has(discordClient.user.id);
+    if (!wasMentioned && !repliedToKiki) {
+      return;
     }
 
     try {
