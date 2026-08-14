@@ -1,9 +1,30 @@
 require('dotenv').config();
 
+const EXCLUDED_USER_ID = process.env.PAYMENT_REPORT_EXCLUDE_USER_ID || '1505731170585935872';
+
+function getSearchableText(message) {
+  let text = message.content || '';
+
+  if (message.embeds && message.embeds.length) {
+    for (let i = 0; i < message.embeds.length; i++) {
+      const embed = message.embeds[i];
+      if (embed.title) text += '\n' + embed.title;
+      if (embed.description) text += '\n' + embed.description;
+      if (embed.fields && embed.fields.length) {
+        for (let j = 0; j < embed.fields.length; j++) {
+          text += '\n' + embed.fields[j].name + ': ' + embed.fields[j].value;
+        }
+      }
+    }
+  }
+
+  return text;
+}
+
 function parsePaymentMessage(content) {
-  const amountMatch = content.match(/Amount Paid:\s*\$?([\d,]+(?:\.\d+)?)/i);
-  const paymentTypeMatch = content.match(/Payment Type:\s*(.+?)\s*Lead Type:/i);
-  const dateMatch = content.match(/Reporting Date:\s*(\d{4}-\d{2}-\d{2})/i);
+  const amountMatch = content.match(/Amount Paid:\**\s*\$?([\d,]+(?:\.\d+)?)/i);
+  const paymentTypeMatch = content.match(/Payment Type:\**\s*(.+?)\s*(?:\n|Lead Type:)/i);
+  const dateMatch = content.match(/Reporting Date:\**\s*(\d{4}-\d{2}-\d{2})/i);
 
   if (!amountMatch || !paymentTypeMatch || !dateMatch) {
     return null;
@@ -33,8 +54,8 @@ function getTodayInTimezone(timezone) {
   return formatter.format(new Date());
 }
 
-async function generateDailyReport(channel, timezone) {
-  const todayStr = getTodayInTimezone(timezone);
+async function generateDailyReport(channel, timezone, overrideDate) {
+  const todayStr = overrideDate || getTodayInTimezone(timezone);
 
   let totalEnglish = 0;
   let totalSpanish = 0;
@@ -59,7 +80,15 @@ async function generateDailyReport(channel, timezone) {
     let oldestInBatchTooOld = true;
 
     messages.forEach((message) => {
-      const parsed = parsePaymentMessage(message.content);
+      lastId = message.id;
+
+      if (message.author && message.author.id === EXCLUDED_USER_ID) {
+        return;
+      }
+
+      const searchableText = getSearchableText(message);
+      const parsed = parsePaymentMessage(searchableText);
+
       if (parsed) {
         if (parsed.reportingDate === todayStr) {
           matchedMessages = matchedMessages + 1;
@@ -75,7 +104,6 @@ async function generateDailyReport(channel, timezone) {
           oldestInBatchTooOld = false;
         }
       }
-      lastId = message.id;
     });
 
     if (oldestInBatchTooOld && matchedMessages > 0) {
@@ -103,10 +131,37 @@ function formatReport(report) {
     + 'Total payments matched: ' + report.matchedMessages;
 }
 
+function formatReportEmbed(report) {
+  return {
+    title: 'Daily Payment Report — ' + report.date,
+    color: 5763719,
+    fields: [
+      {
+        name: 'Total LTV - English',
+        value: '$' + report.totalEnglish.toFixed(2) + ' (' + report.countEnglish + ' payments)',
+        inline: true,
+      },
+      {
+        name: 'Total LTV - Spanish',
+        value: '$' + report.totalSpanish.toFixed(2) + ' (' + report.countSpanish + ' payments)',
+        inline: true,
+      },
+      {
+        name: 'Total Payments Matched',
+        value: String(report.matchedMessages),
+        inline: false,
+      },
+    ],
+    timestamp: new Date().toISOString(),
+  };
+}
+
 module.exports = {
   parsePaymentMessage: parsePaymentMessage,
+  getSearchableText: getSearchableText,
   isSpanish: isSpanish,
   getTodayInTimezone: getTodayInTimezone,
   generateDailyReport: generateDailyReport,
   formatReport: formatReport,
+  formatReportEmbed: formatReportEmbed,
 };
