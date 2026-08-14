@@ -5,6 +5,11 @@ const { getClientByDiscordChannel } = require('../config/clients');
 const { appendNoteToPlaybook } = require('./memoryWriter');
 const { fetchAllPayments } = require('./payraClient');
 const { appendNewPayments } = require('./googleSheets');
+const { generateDailyReport, formatReport } = require('./paymentReport');
+const { scheduleDaily } = require('./scheduler');
+
+const PAYMENT_REPORT_CHANNEL_ID = process.env.PAYMENT_REPORT_CHANNEL_ID;
+const REPORT_TIMEZONE = 'America/Chicago';
 
 const historyByChannel = new Map();
 const MAX_TURNS = 20;
@@ -27,12 +32,6 @@ function splitMessage(text, limit) {
   return chunks.length ? chunks : [text];
 }
 
-/**
- * Groups incoming records into ~windowDays-sized chunks (by payment date,
- * not by API page) and flushes each chunk once the window is exceeded.
- * This is separate from the API's own page size and the rate-limit delay
- * between calls — this only controls how often we write to the sheet.
- */
 function createDateWindowBatcher(windowDays, onFlush) {
   let buffer = [];
   let windowStartDate = null;
@@ -88,6 +87,20 @@ function start() {
   client.once('ready', () => {
     discordClient = client;
     console.log('⚡ Discord bot (' + client.user.tag + ') is running');
+
+    if (PAYMENT_REPORT_CHANNEL_ID) {
+      scheduleDaily(21, 0, REPORT_TIMEZONE, async () => {
+        try {
+          const channel = await discordClient.channels.fetch(PAYMENT_REPORT_CHANNEL_ID);
+          const report = await generateDailyReport(channel, REPORT_TIMEZONE);
+          await channel.send(formatReport(report));
+        } catch (err) {
+          console.error('[scheduler] Daily payment report failed:', err.message);
+        }
+      });
+    } else {
+      console.log('Skipping daily payment report scheduler — PAYMENT_REPORT_CHANNEL_ID not set.');
+    }
   });
 
   client.on('messageCreate', async (message) => {
@@ -137,7 +150,7 @@ function start() {
         let runningTotalAdded = 0;
         let runningTotalSkipped = 0;
         let flushCount = 0;
-        const WINDOW_DAYS = 60; // roughly 2 months
+        const WINDOW_DAYS = 60;
 
         const flushBatch = async (records) => {
           flushCount = flushCount + 1;
@@ -188,10 +201,26 @@ function start() {
       return;
     }
 
+    if (contentWithoutMention.toLowerCase().startsWith('!payment-report')) {
+      if (message.author.id !== process.env.ELISA_DISCORD_USER_ID) {
+        await message.reply("Only Elisa can run the payment report manually.");
+        return;
+      }
+
+      await message.reply('Generating today\'s payment report from this channel\'s history...');
+
+      try {
+        const report = await generateDailyReport(message.channel, REPORT_TIMEZONE);
+        await message.channel.send(formatReport(report));
+      } catch (err) {
+        console.error('[discord] !payment-report failed:', err.message);
+        await message.reply("Report generation failed — " + err.message);
+      }
+      return;
+    }
+
     const history = appendHistory(message.channelId, 'user', message.content);
 
-    // If this message is a reply to an earlier one, pull the original in as
-    // context — otherwise "what's the update on this?" has nothing to point at.
     let repliedToKiki = false;
     if (message.reference) {
       try {
@@ -204,10 +233,6 @@ function start() {
       }
     }
 
-    // Only actually respond if Kiki was tagged, or this is a direct reply to
-    // one of Kiki's own messages. Otherwise, stay silent but keep the message
-    // in history above — so Kiki still has full context for when it IS asked
-    // something, without replying to every unrelated conversation in the channel.
     const wasMentioned = discordClient && message.mentions.users.has(discordClient.user.id);
     if (!wasMentioned && !repliedToKiki) {
       return;
