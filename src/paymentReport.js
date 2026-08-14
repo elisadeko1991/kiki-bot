@@ -1,7 +1,8 @@
 require('dotenv').config();
 
 // Messages from this user are never counted — even if they happen to match
-// the payment format (e.g. a bot re-posting or relaying messages).
+// the payment format. This is Luna's bot ID (the celebratory "NEW WIN"
+// rebroadcast bot) — confirmed via !debug-payments raw output.
 const EXCLUDED_USER_ID = process.env.PAYMENT_REPORT_EXCLUDE_USER_ID || '1505731170585935872';
 
 /**
@@ -24,6 +25,11 @@ function getSearchableText(message) {
           text += '\n' + embed.fields[j].name + ': ' + embed.fields[j].value;
         }
       }
+      // The Reporting Date field lives in the footer, not the description —
+      // confirmed via !debug-payments raw output. Without this, every
+      // message silently failed to match (no date = no match at all).
+      if (embed.footer && embed.footer.text) text += '\n' + embed.footer.text;
+      if (embed.author && embed.author.name) text += '\n' + embed.author.name;
     }
   }
 
