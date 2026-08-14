@@ -207,6 +207,45 @@ function start() {
       return;
     }
 
+    if (contentWithoutMention.toLowerCase().startsWith('!debug-payments')) {
+      if (message.author.id !== process.env.ELISA_DISCORD_USER_ID) {
+        await message.reply("Only Elisa can run this.");
+        return;
+      }
+
+      try {
+        const recent = await message.channel.messages.fetch({ limit: 10 });
+        let report = 'Raw structure of last 10 messages:\n\n';
+        let count = 0;
+        recent.forEach((m) => {
+          if (count >= 5) return; // keep it short enough to fit a Discord message
+          count = count + 1;
+          report += '--- Message from ' + m.author.username + ' (id: ' + m.author.id + ') ---\n';
+          report += 'content: ' + JSON.stringify(m.content).slice(0, 300) + '\n';
+          report += 'embeds count: ' + m.embeds.length + '\n';
+          if (m.embeds.length > 0) {
+            const e = m.embeds[0];
+            report += 'embed.title: ' + JSON.stringify(e.title) + '\n';
+            report += 'embed.description: ' + JSON.stringify((e.description || '').slice(0, 300)) + '\n';
+            report += 'embed.fields count: ' + (e.fields ? e.fields.length : 0) + '\n';
+            if (e.fields && e.fields.length > 0) {
+              report += 'first field: ' + JSON.stringify(e.fields[0]) + '\n';
+            }
+          }
+          report += '\n';
+        });
+
+        const chunks = splitMessage(report);
+        for (let i = 0; i < chunks.length; i++) {
+          await message.channel.send('```\n' + chunks[i] + '\n```');
+        }
+      } catch (err) {
+        console.error('[discord] !debug-payments failed:', err.message);
+        await message.reply("Debug failed — " + err.message);
+      }
+      return;
+    }
+
     if (contentWithoutMention.toLowerCase().startsWith('!payment-report')) {
       if (message.author.id !== process.env.ELISA_DISCORD_USER_ID) {
         await message.reply("Only Elisa can run the payment report manually.");
