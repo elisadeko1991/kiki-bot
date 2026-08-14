@@ -157,23 +157,10 @@ function formatReportEmbed(report) {
   return {
     title: 'Daily Payment Report — ' + report.date,
     color: 5763719,
-    fields: [
-      {
-        name: 'Total Payments',
-        value: '$' + totalAmount.toFixed(2) + ' (' + report.matchedMessages + ' payments)',
-        inline: false,
-      },
-      {
-        name: 'Total LTV - English',
-        value: '$' + report.totalEnglish.toFixed(2) + ' (' + report.countEnglish + ' payments)',
-        inline: false,
-      },
-      {
-        name: 'Total LTV - Spanish',
-        value: '$' + report.totalSpanish.toFixed(2) + ' (' + report.countSpanish + ' payments)',
-        inline: false,
-      },
-    ],
+    description:
+      '**Total Payments:** $' + totalAmount.toFixed(2) + ' (' + report.matchedMessages + ' payments)\n'
+      + '**Total LTV - English:** $' + report.totalEnglish.toFixed(2) + ' (' + report.countEnglish + ' payments)\n'
+      + '**Total LTV - Spanish:** $' + report.totalSpanish.toFixed(2) + ' (' + report.countSpanish + ' payments)',
     timestamp: new Date().toISOString(),
   };
 }
