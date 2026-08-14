@@ -1,17 +1,7 @@
 require('dotenv').config();
 
-// Messages from this user are never counted — even if they happen to match
-// the payment format. This is Luna's bot ID (the celebratory "NEW WIN"
-// rebroadcast bot) — confirmed via !debug-payments raw output.
 const EXCLUDED_USER_ID = process.env.PAYMENT_REPORT_EXCLUDE_USER_ID || '1505731170585935872';
 
-/**
- * Builds one combined text blob from a Discord message — its plain content
- * plus anything inside embeds (title, description, fields) — so the same
- * regex-based parser below works whether the message is:
- *   - typed manually by a team member (plain text), or
- *   - posted by an automation as a rich embed (like the LeadLab bot)
- */
 function getSearchableText(message) {
   let text = message.content || '';
 
@@ -25,9 +15,6 @@ function getSearchableText(message) {
           text += '\n' + embed.fields[j].name + ': ' + embed.fields[j].value;
         }
       }
-      // The Reporting Date field lives in the footer, not the description —
-      // confirmed via !debug-payments raw output. Without this, every
-      // message silently failed to match (no date = no match at all).
       if (embed.footer && embed.footer.text) text += '\n' + embed.footer.text;
       if (embed.author && embed.author.name) text += '\n' + embed.author.name;
     }
@@ -36,14 +23,11 @@ function getSearchableText(message) {
   return text;
 }
 
-/**
- * Parses payment details out of a text blob (see getSearchableText above).
- * Returns { amount, paymentType, reportingDate } or null if it doesn't match.
- */
 function parsePaymentMessage(content) {
   const amountMatch = content.match(/Amount Paid:\**\s*\$?([\d,]+(?:\.\d+)?)/i);
   const paymentTypeMatch = content.match(/Payment Type:\**\s*(.+?)\s*(?:\n|Lead Type:)/i);
   const dateMatch = content.match(/Reporting Date:\**\s*(\d{4}-\d{2}-\d{2})/i);
+  const agentMatch = content.match(/New Payment Collected by\**\s*([^\n]+)/i);
 
   if (!amountMatch || !paymentTypeMatch || !dateMatch) {
     return null;
@@ -56,6 +40,7 @@ function parsePaymentMessage(content) {
     amount: amount,
     paymentType: paymentTypeMatch[1].trim(),
     reportingDate: dateMatch[1],
+    agent: agentMatch ? agentMatch[1].trim() : 'Unknown',
   };
 }
 
@@ -63,7 +48,6 @@ function isSpanish(paymentType) {
   return paymentType.toLowerCase().includes('spanish');
 }
 
-/** Returns today's date as YYYY-MM-DD in the given IANA timezone. */
 function getTodayInTimezone(timezone) {
   const formatter = new Intl.DateTimeFormat('en-CA', {
     timeZone: timezone,
@@ -74,11 +58,14 @@ function getTodayInTimezone(timezone) {
   return formatter.format(new Date());
 }
 
-/**
- * Fetches recent message history from a channel and totals payments whose
- * Reporting Date matches todayStr (or an explicit override date). Reads
- * both plain-text messages and embeds. Skips EXCLUDED_USER_ID entirely.
- */
+function addToAgentBucket(bucket, agent, amount) {
+  if (!bucket[agent]) {
+    bucket[agent] = { count: 0, total: 0 };
+  }
+  bucket[agent].count = bucket[agent].count + 1;
+  bucket[agent].total += amount;
+}
+
 async function generateDailyReport(channel, timezone, overrideDate) {
   const todayStr = overrideDate || getTodayInTimezone(timezone);
 
@@ -87,6 +74,8 @@ async function generateDailyReport(channel, timezone, overrideDate) {
   let countEnglish = 0;
   let countSpanish = 0;
   let matchedMessages = 0;
+  const englishByAgent = {};
+  const spanishByAgent = {};
 
   let lastId = null;
   const MAX_BATCHES = 20;
@@ -108,7 +97,7 @@ async function generateDailyReport(channel, timezone, overrideDate) {
       lastId = message.id;
 
       if (message.author && message.author.id === EXCLUDED_USER_ID) {
-        return; // skip entirely, don't parse or count
+        return;
       }
 
       const searchableText = getSearchableText(message);
@@ -120,9 +109,11 @@ async function generateDailyReport(channel, timezone, overrideDate) {
           if (isSpanish(parsed.paymentType)) {
             totalSpanish += parsed.amount;
             countSpanish = countSpanish + 1;
+            addToAgentBucket(spanishByAgent, parsed.agent, parsed.amount);
           } else {
             totalEnglish += parsed.amount;
             countEnglish = countEnglish + 1;
+            addToAgentBucket(englishByAgent, parsed.agent, parsed.amount);
           }
           oldestInBatchTooOld = false;
         } else if (parsed.reportingDate > todayStr) {
@@ -146,29 +137,85 @@ async function generateDailyReport(channel, timezone, overrideDate) {
     countEnglish: countEnglish,
     countSpanish: countSpanish,
     matchedMessages: matchedMessages,
+    englishByAgent: englishByAgent,
+    spanishByAgent: spanishByAgent,
   };
 }
 
-/** Plain-text version, kept for logging/fallback use. */
-function formatReport(report) {
-  return '**Daily Payment Report — ' + report.date + '**\n\n'
-    + '**Total LTV - English:** $' + report.totalEnglish.toFixed(2) + ' (' + report.countEnglish + ' payments)\n'
-    + '**Total LTV - Spanish:** $' + report.totalSpanish.toFixed(2) + ' (' + report.countSpanish + ' payments)\n\n'
-    + 'Total payments matched: ' + report.matchedMessages;
+/** Builds a sorted array of { agent, deals, aov, revenue } from a bucket map. */
+function buildAgentRows(bucket) {
+  const rows = Object.keys(bucket).map((agent) => {
+    const data = bucket[agent];
+    return {
+      agent: agent,
+      deals: data.count,
+      aov: data.total / data.count,
+      revenue: data.total,
+    };
+  });
+  rows.sort((a, b) => b.revenue - a.revenue);
+  return rows;
 }
 
-/** Discord embed (JSON) version — this is what actually gets sent now. */
+function padRight(str, len) {
+  str = String(str);
+  while (str.length < len) str = str + ' ';
+  return str;
+}
+
+function padLeft(str, len) {
+  str = String(str);
+  while (str.length < len) str = ' ' + str;
+  return str;
+}
+
+/** Renders a monospace leaderboard table for a code block, plus a top-performer line. */
+function formatSection(label, rows) {
+  if (rows.length === 0) {
+    return '**' + label + '** — no payments today';
+  }
+
+  const top = rows[0];
+  let out = '**' + label + '** 🥇 ' + top.agent + ' — $' + top.revenue.toFixed(0) + '\n';
+  out += '```\n';
+  out += padRight('#', 3) + padRight('Closer', 12) + padLeft('Deals', 6) + padLeft('AOV', 9) + padLeft('Rev', 10) + '\n';
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    out += padRight(String(i + 1), 3)
+      + padRight(r.agent, 12)
+      + padLeft(String(r.deals), 6)
+      + padLeft('$' + r.aov.toFixed(0), 9)
+      + padLeft('$' + r.revenue.toFixed(0), 10)
+      + '\n';
+  }
+  out += '```';
+  return out;
+}
+
 function formatReportEmbed(report) {
   const totalAmount = report.totalEnglish + report.totalSpanish;
+  const englishRows = buildAgentRows(report.englishByAgent);
+  const spanishRows = buildAgentRows(report.spanishByAgent);
+
+  const description =
+    '**Total Payments:** $' + totalAmount.toFixed(2) + ' (' + report.matchedMessages + ' payments)\n\n'
+    + formatSection('English', englishRows) + '\n\n'
+    + formatSection('Spanish', spanishRows);
+
   return {
     title: 'Daily Payment Report — ' + report.date,
     color: 5763719,
-    description:
-      '**Total Payments:** $' + totalAmount.toFixed(2) + ' (' + report.matchedMessages + ' payments)\n'
-      + '**Total LTV - English:** $' + report.totalEnglish.toFixed(2) + ' (' + report.countEnglish + ' payments)\n'
-      + '**Total LTV - Spanish:** $' + report.totalSpanish.toFixed(2) + ' (' + report.countSpanish + ' payments)',
+    description: description,
     timestamp: new Date().toISOString(),
   };
+}
+
+/** Plain-text fallback, kept for logging/debug use. */
+function formatReport(report) {
+  return 'Daily Payment Report — ' + report.date + '\n'
+    + 'Total Payments: $' + (report.totalEnglish + report.totalSpanish).toFixed(2) + ' (' + report.matchedMessages + ' payments)\n'
+    + 'English: $' + report.totalEnglish.toFixed(2) + ' (' + report.countEnglish + ')\n'
+    + 'Spanish: $' + report.totalSpanish.toFixed(2) + ' (' + report.countSpanish + ')';
 }
 
 module.exports = {
