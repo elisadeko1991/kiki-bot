@@ -41,6 +41,7 @@ Follow the hard rules and escalation policy in the reference material below exac
     ],
     discordChannelIds: [
       '1526976343177170955',
+      '1533177235123601448',
     ],
 
     // Zapier + Make access — see .env.example for how tokens are generated.
@@ -86,7 +87,7 @@ If asked to do something outside your access (e.g. an integration you don't have
       // 'C0123ABCDEF',
     ],
     discordChannelIds: [
-      '1526976343177170955',
+      // '1526976343177170955',
     ],
 
     // Tools this client's agent can use. Empty array = chat only, no tool access yet.
