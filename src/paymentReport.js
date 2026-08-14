@@ -169,22 +169,23 @@ function padLeft(str, len) {
   return str;
 }
 
-/** Renders a monospace leaderboard table for a code block, plus a top-performer line. */
-function formatSection(label, rows) {
+/** Renders a monospace leaderboard table for a code block. Top row (by
+ * revenue, already sorted) gets a medal emoji next to the closer's name. */
+function formatSection(label, rows, totalAmount) {
+  let out = '**Total LTV - ' + label + ':** $' + totalAmount.toFixed(2) + ' (' + rows.reduce((sum, r) => sum + r.deals, 0) + ' payments)\n';
+
   if (rows.length === 0) {
-    return '**' + label + '** — no payments today';
+    return out + '_no payments today_';
   }
 
-  const top = rows[0];
-  let out = '**' + label + '** 🥇 ' + top.agent + ' — $' + top.revenue.toFixed(0) + '\n';
   out += '```\n';
-  out += padRight('#', 3) + padRight('Closer', 12) + padLeft('Deals', 6) + padLeft('AOV', 9) + padLeft('Rev', 10) + '\n';
+  out += padRight('#', 3) + padRight('Closer', 20) + padLeft('Deals', 6) + padLeft('Rev', 10) + '\n';
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
+    const closerLabel = (i === 0 ? '🥇 ' : '') + r.agent;
     out += padRight(String(i + 1), 3)
-      + padRight(r.agent, 12)
+      + padRight(closerLabel, 20)
       + padLeft(String(r.deals), 6)
-      + padLeft('$' + r.aov.toFixed(0), 9)
       + padLeft('$' + r.revenue.toFixed(0), 10)
       + '\n';
   }
@@ -199,8 +200,8 @@ function formatReportEmbed(report) {
 
   const description =
     '**Total Payments:** $' + totalAmount.toFixed(2) + ' (' + report.matchedMessages + ' payments)\n\n'
-    + formatSection('English', englishRows) + '\n\n'
-    + formatSection('Spanish', spanishRows);
+    + formatSection('English', englishRows, report.totalEnglish) + '\n\n'
+    + formatSection('Spanish', spanishRows, report.totalSpanish);
 
   return {
     title: 'Daily Payment Report — ' + report.date,
