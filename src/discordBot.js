@@ -213,8 +213,6 @@ function start() {
         return;
       }
 
-      await message.reply('Generating today\'s payment report from this channel\'s history...');
-
       try {
         const report = await generateDailyReport(message.channel, REPORT_TIMEZONE);
         await message.channel.send({ embeds: [formatReportEmbed(report)] });

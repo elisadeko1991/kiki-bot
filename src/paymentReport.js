@@ -1,7 +1,16 @@
 require('dotenv').config();
 
+// Messages from this user are never counted — even if they happen to match
+// the payment format (e.g. a bot re-posting or relaying messages).
 const EXCLUDED_USER_ID = process.env.PAYMENT_REPORT_EXCLUDE_USER_ID || '1505731170585935872';
 
+/**
+ * Builds one combined text blob from a Discord message — its plain content
+ * plus anything inside embeds (title, description, fields) — so the same
+ * regex-based parser below works whether the message is:
+ *   - typed manually by a team member (plain text), or
+ *   - posted by an automation as a rich embed (like the LeadLab bot)
+ */
 function getSearchableText(message) {
   let text = message.content || '';
 
@@ -21,6 +30,10 @@ function getSearchableText(message) {
   return text;
 }
 
+/**
+ * Parses payment details out of a text blob (see getSearchableText above).
+ * Returns { amount, paymentType, reportingDate } or null if it doesn't match.
+ */
 function parsePaymentMessage(content) {
   const amountMatch = content.match(/Amount Paid:\**\s*\$?([\d,]+(?:\.\d+)?)/i);
   const paymentTypeMatch = content.match(/Payment Type:\**\s*(.+?)\s*(?:\n|Lead Type:)/i);
@@ -44,6 +57,7 @@ function isSpanish(paymentType) {
   return paymentType.toLowerCase().includes('spanish');
 }
 
+/** Returns today's date as YYYY-MM-DD in the given IANA timezone. */
 function getTodayInTimezone(timezone) {
   const formatter = new Intl.DateTimeFormat('en-CA', {
     timeZone: timezone,
@@ -54,6 +68,11 @@ function getTodayInTimezone(timezone) {
   return formatter.format(new Date());
 }
 
+/**
+ * Fetches recent message history from a channel and totals payments whose
+ * Reporting Date matches todayStr (or an explicit override date). Reads
+ * both plain-text messages and embeds. Skips EXCLUDED_USER_ID entirely.
+ */
 async function generateDailyReport(channel, timezone, overrideDate) {
   const todayStr = overrideDate || getTodayInTimezone(timezone);
 
@@ -83,7 +102,7 @@ async function generateDailyReport(channel, timezone, overrideDate) {
       lastId = message.id;
 
       if (message.author && message.author.id === EXCLUDED_USER_ID) {
-        return;
+        return; // skip entirely, don't parse or count
       }
 
       const searchableText = getSearchableText(message);
@@ -124,6 +143,7 @@ async function generateDailyReport(channel, timezone, overrideDate) {
   };
 }
 
+/** Plain-text version, kept for logging/fallback use. */
 function formatReport(report) {
   return '**Daily Payment Report — ' + report.date + '**\n\n'
     + '**Total LTV - English:** $' + report.totalEnglish.toFixed(2) + ' (' + report.countEnglish + ' payments)\n'
@@ -131,24 +151,26 @@ function formatReport(report) {
     + 'Total payments matched: ' + report.matchedMessages;
 }
 
+/** Discord embed (JSON) version — this is what actually gets sent now. */
 function formatReportEmbed(report) {
+  const totalAmount = report.totalEnglish + report.totalSpanish;
   return {
     title: 'Daily Payment Report — ' + report.date,
     color: 5763719,
     fields: [
       {
+        name: 'Total Payments',
+        value: '$' + totalAmount.toFixed(2) + ' (' + report.matchedMessages + ' payments)',
+        inline: false,
+      },
+      {
         name: 'Total LTV - English',
         value: '$' + report.totalEnglish.toFixed(2) + ' (' + report.countEnglish + ' payments)',
-        inline: true,
+        inline: false,
       },
       {
         name: 'Total LTV - Spanish',
         value: '$' + report.totalSpanish.toFixed(2) + ' (' + report.countSpanish + ' payments)',
-        inline: true,
-      },
-      {
-        name: 'Total Payments Matched',
-        value: String(report.matchedMessages),
         inline: false,
       },
     ],
