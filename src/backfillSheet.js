@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { google } = require('googleapis');
+const { getSheetsClient } = require('./googleAuth');
 
 const TAB_NAME = 'Backfill: Successful Payments & Clients';
 const FULL_RANGE = "'" + TAB_NAME + "'!A:P";
@@ -12,37 +12,19 @@ const HEADER_ROW = [
   'Number of Leads', 'Types of Leads', 'Start Date',
 ];
 
-// Authenticate ONCE and reuse this same client for every call — repeatedly
-// re-parsing the private key on every single request under heavy load is
-// what was triggering intermittent Node/OpenSSL decode failures.
-let cachedSheetsClient = null;
-
-function getSheetsClient() {
-  if (cachedSheetsClient) return cachedSheetsClient;
-
-  const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-  const rawKey = process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY;
-  if (!email || !rawKey) {
-    throw new Error('Missing GOOGLE_SERVICE_ACCOUNT_EMAIL or GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY.');
-  }
-  const privateKey = rawKey.replace(/\\n/g, '\n');
-  const auth = new google.auth.JWT(email, null, privateKey, ['https://www.googleapis.com/auth/spreadsheets']);
-
-  cachedSheetsClient = google.sheets({ version: 'v4', auth: auth });
-  return cachedSheetsClient;
-}
-
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Thin resilience wrapper for genuinely transient HTTP failures (5xx, socket
+// resets). The private-key decode error this used to "retry" is now impossible
+// at call time — googleAuth validates and canonicalizes the key up front — so
+// there is nothing to mask here anymore.
 async function withRetry(fn) {
   try {
     return await fn();
   } catch (err) {
     console.error('[backfillSheet] Call failed, retrying once in 5s:', err.message);
-    // On retry, force a fresh client in case the cached one is in a bad state.
-    cachedSheetsClient = null;
     await wait(5000);
     return await fn();
   }

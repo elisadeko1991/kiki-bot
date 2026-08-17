@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { google } = require('googleapis');
+const { getSheetsClient } = require('./googleAuth');
 
 const SHEET_RANGE = "'Successful Payments'!A:M"; // Payment ID, External ID, Type, Sub Type, Display Name, Last 4, Total, Tip, Tax, Fee, Paid On, Status, Transaction Type
 const HEADER_ROW = [
@@ -17,24 +17,6 @@ const HEADER_ROW = [
   'Status',
   'Transaction Type',
 ];
-
-function getAuthClient() {
-  const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-  const rawKey = process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY;
-
-  if (!email || !rawKey) {
-    throw new Error('Missing GOOGLE_SERVICE_ACCOUNT_EMAIL or GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY in environment.');
-  }
-
-  const privateKey = rawKey.replace(/\\n/g, '\n');
-
-  return new google.auth.JWT(
-    email,
-    null,
-    privateKey,
-    ['https://www.googleapis.com/auth/spreadsheets']
-  );
-}
 
 function paymentToRow(payment) {
   return [
@@ -60,8 +42,7 @@ async function appendNewPayments(payments) {
     throw new Error('Missing GOOGLE_SHEET_ID in environment.');
   }
 
-  const auth = getAuthClient();
-  const sheets = google.sheets({ version: 'v4', auth: auth });
+  const sheets = getSheetsClient();
 
   const existingResponse = await sheets.spreadsheets.values.get({
     spreadsheetId: sheetId,

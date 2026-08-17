@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { google } = require('googleapis');
+const { getSheetsClient } = require('./googleAuth');
 
 const TAB_NAME = 'Backfill Clients';
 const FULL_RANGE = "'" + TAB_NAME + "'!A:H";
@@ -9,33 +9,17 @@ const HEADER_ROW = [
   'States', 'Number of Leads', 'Types of Leads', 'Start Date',
 ];
 
-let cachedSheetsClient = null;
-
-function getSheetsClient() {
-  if (cachedSheetsClient) return cachedSheetsClient;
-
-  const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
-  const rawKey = process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY;
-  if (!email || !rawKey) {
-    throw new Error('Missing GOOGLE_SERVICE_ACCOUNT_EMAIL or GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY.');
-  }
-  const privateKey = rawKey.replace(/\\n/g, '\n');
-  const auth = new google.auth.JWT(email, null, privateKey, ['https://www.googleapis.com/auth/spreadsheets']);
-
-  cachedSheetsClient = google.sheets({ version: 'v4', auth: auth });
-  return cachedSheetsClient;
-}
-
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// See googleAuth.js — the key is validated/canonicalized once at first use, so
+// this wrapper only guards against transient HTTP failures now, not decode errors.
 async function withRetry(fn) {
   try {
     return await fn();
   } catch (err) {
     console.error('[clientsSheet] Call failed, retrying once in 5s:', err.message);
-    cachedSheetsClient = null;
     await wait(5000);
     return await fn();
   }
