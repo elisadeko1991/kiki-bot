@@ -32,12 +32,6 @@ function splitMessage(text, limit) {
   return chunks.length ? chunks : [text];
 }
 
-/**
- * Groups incoming records into ~windowDays-sized chunks (by payment date,
- * not by API page) and flushes each chunk once the window is exceeded.
- * This is separate from the API's own page size and the rate-limit delay
- * between calls — this only controls how often we write to the sheet.
- */
 function createDateWindowBatcher(windowDays, onFlush) {
   let buffer = [];
   let windowStartDate = null;
@@ -156,7 +150,7 @@ function start() {
         let runningTotalAdded = 0;
         let runningTotalSkipped = 0;
         let flushCount = 0;
-        const WINDOW_DAYS = 60; // roughly 2 months
+        const WINDOW_DAYS = 60;
 
         const flushBatch = async (records) => {
           flushCount = flushCount + 1;
@@ -218,7 +212,7 @@ function start() {
         let report = 'Raw structure of last 10 messages:\n\n';
         let count = 0;
         recent.forEach((m) => {
-          if (count >= 5) return; // keep it short enough to fit a Discord message
+          if (count >= 5) return;
           count = count + 1;
           report += '--- Message from ' + m.author.username + ' (id: ' + m.author.id + ') ---\n';
           report += 'content: ' + JSON.stringify(m.content).slice(0, 300) + '\n';
@@ -246,6 +240,62 @@ function start() {
       return;
     }
 
+    if (contentWithoutMention.toLowerCase().startsWith('!debug-channel')) {
+      if (message.author.id !== process.env.ELISA_DISCORD_USER_ID) {
+        await message.reply("Only Elisa can run this.");
+        return;
+      }
+
+      const parts = contentWithoutMention.split(/\s+/);
+      const targetChannelId = parts[1];
+      if (!targetChannelId) {
+        await message.reply('Usage: `!debug-channel <channelId>` (optionally add a user ID to filter: `!debug-channel <channelId> <userId>`)');
+        return;
+      }
+      const filterUserId = parts[2];
+
+      try {
+        const targetChannel = await discordClient.channels.fetch(targetChannelId);
+        const recent = await targetChannel.messages.fetch({ limit: 50 });
+
+        let report = 'Raw structure from channel ' + targetChannelId + (filterUserId ? ' (filtered to user ' + filterUserId + ')' : '') + ':\n\n';
+        let count = 0;
+
+        recent.forEach((m) => {
+          if (count >= 5) return;
+          if (filterUserId && m.author.id !== filterUserId) return;
+          count = count + 1;
+          report += '--- Message from ' + m.author.username + ' (id: ' + m.author.id + ') ---\n';
+          report += 'content: ' + JSON.stringify(m.content).slice(0, 500) + '\n';
+          report += 'embeds count: ' + m.embeds.length + '\n';
+          if (m.embeds.length > 0) {
+            const e = m.embeds[0];
+            report += 'embed.title: ' + JSON.stringify(e.title) + '\n';
+            report += 'embed.description: ' + JSON.stringify((e.description || '').slice(0, 500)) + '\n';
+            report += 'embed.footer: ' + JSON.stringify(e.footer || null) + '\n';
+            report += 'embed.fields count: ' + (e.fields ? e.fields.length : 0) + '\n';
+            if (e.fields && e.fields.length > 0) {
+              report += 'fields: ' + JSON.stringify(e.fields).slice(0, 500) + '\n';
+            }
+          }
+          report += '\n';
+        });
+
+        if (count === 0) {
+          report += '(no matching messages found in the most recent 50)';
+        }
+
+        const chunks = splitMessage(report);
+        for (let i = 0; i < chunks.length; i++) {
+          await message.channel.send('```\n' + chunks[i] + '\n```');
+        }
+      } catch (err) {
+        console.error('[discord] !debug-channel failed:', err.message);
+        await message.reply("Debug failed — " + err.message);
+      }
+      return;
+    }
+
     if (contentWithoutMention.toLowerCase().startsWith('!payment-report')) {
       if (message.author.id !== process.env.ELISA_DISCORD_USER_ID) {
         await message.reply("Only Elisa can run the payment report manually.");
@@ -264,8 +314,6 @@ function start() {
 
     const history = appendHistory(message.channelId, 'user', message.content);
 
-    // If this message is a reply to an earlier one, pull the original in as
-    // context — otherwise "what's the update on this?" has nothing to point at.
     let repliedToKiki = false;
     if (message.reference) {
       try {
@@ -278,10 +326,6 @@ function start() {
       }
     }
 
-    // Only actually respond if Kiki was tagged, or this is a direct reply to
-    // one of Kiki's own messages. Otherwise, stay silent but keep the message
-    // in history above — so Kiki still has full context for when it IS asked
-    // something, without replying to every unrelated conversation in the channel.
     const wasMentioned = discordClient && message.mentions.users.has(discordClient.user.id);
     if (!wasMentioned && !repliedToKiki) {
       return;
