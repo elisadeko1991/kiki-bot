@@ -26,13 +26,32 @@ function getSheetsClient() {
   return google.sheets({ version: 'v4', auth: getAuthClient() });
 }
 
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Retries a Sheets API call once after a short delay if it fails — handles
+ * occasional transient network/TLS blips (e.g. "DECODER routines" errors)
+ * without aborting a long-running backfill over a one-off hiccup.
+ */
+async function withRetry(fn) {
+  try {
+    return await fn();
+  } catch (err) {
+    console.error('[backfillSheet] Call failed, retrying once in 5s:', err.message);
+    await wait(5000);
+    return await fn(); // if it fails again, let the error propagate normally
+  }
+}
+
+/** Reads every existing row from the sheet, with 1-based row numbers. */
 async function getExistingRows() {
   const sheetId = process.env.GOOGLE_SHEET_ID;
-  const sheets = getSheetsClient();
 
-  const response = await sheets.spreadsheets.values.get({
-    spreadsheetId: sheetId,
-    range: FULL_RANGE,
+  const response = await withRetry(async () => {
+    const sheets = getSheetsClient();
+    return sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: FULL_RANGE });
   });
 
   const values = response.data.values || [];
@@ -62,34 +81,34 @@ function needsEnrichment(row) {
 
 async function updateRowEnrichment(rowNumber, enrichment) {
   const sheetId = process.env.GOOGLE_SHEET_ID;
-  const sheets = getSheetsClient();
-
   const range = "'" + TAB_NAME + "'!" + ENRICHMENT_START_COL + rowNumber + ':P' + rowNumber;
 
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: sheetId,
-    range: range,
-    valueInputOption: 'USER_ENTERED',
-    requestBody: {
-      values: [[
-        enrichment.packageSelected || '',
-        enrichment.targetAreas || '',
-        enrichment.states || '',
-        enrichment.numberOfLeads || '',
-        enrichment.typesOfLeads || '',
-        enrichment.startDate || '',
-      ]],
-    },
+  await withRetry(async () => {
+    const sheets = getSheetsClient();
+    return sheets.spreadsheets.values.update({
+      spreadsheetId: sheetId,
+      range: range,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[
+          enrichment.packageSelected || '',
+          enrichment.targetAreas || '',
+          enrichment.states || '',
+          enrichment.numberOfLeads || '',
+          enrichment.typesOfLeads || '',
+          enrichment.startDate || '',
+        ]],
+      },
+    });
   });
 }
 
 async function appendRows(rows) {
   const sheetId = process.env.GOOGLE_SHEET_ID;
-  const sheets = getSheetsClient();
 
-  const existingResponse = await sheets.spreadsheets.values.get({
-    spreadsheetId: sheetId,
-    range: FULL_RANGE,
+  const existingResponse = await withRetry(async () => {
+    const sheets = getSheetsClient();
+    return sheets.spreadsheets.values.get({ spreadsheetId: sheetId, range: FULL_RANGE });
   });
   const existingRows = existingResponse.data.values || [];
 
@@ -106,11 +125,14 @@ async function appendRows(rows) {
   }
 
   if (rowsToAppend.length > 0) {
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: sheetId,
-      range: FULL_RANGE,
-      valueInputOption: 'USER_ENTERED',
-      requestBody: { values: rowsToAppend },
+    await withRetry(async () => {
+      const sheets = getSheetsClient();
+      return sheets.spreadsheets.values.append({
+        spreadsheetId: sheetId,
+        range: FULL_RANGE,
+        valueInputOption: 'USER_ENTERED',
+        requestBody: { values: rowsToAppend },
+      });
     });
   }
 

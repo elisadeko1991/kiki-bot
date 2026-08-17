@@ -365,6 +365,7 @@ function start() {
         stillRunning = false;
         clearInterval(heartbeat);
         console.error('[discord] !backfill-payments failed:', err.message);
+        console.error('[discord] Full stack trace:', err.stack);
         await message.reply("Backfill failed — " + err.message + (isDryRun ? '' : ' (Anything already written before this error is safe.)'));
       }
       return;
