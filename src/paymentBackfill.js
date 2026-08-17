@@ -1,6 +1,6 @@
 require('dotenv').config();
 const { extractJSON } = require('./extractor');
-const { getExistingRows, needsEnrichment, updateRowEnrichment, appendRows } = require('./backfillSheet');
+const { getExistingRows, needsEnrichment, updateRowEnrichmentBatch, appendRows } = require('./backfillSheet');
 const { appendClientRows, getAllClientRows } = require('./clientsSheet');
 
 const ZELLE_CHANNEL_ID = '1263960214126854174';
@@ -21,6 +21,15 @@ const CLIENT_SETUP_EXTRACTION_PROMPT = 'Extract client setup details from this t
   + 'number into numberOfLeads and the rest into typesOfLeads. startDate may appear as "Launch Date:", "launch date is", or similar '
   + 'phrasing — extract it as plain text (e.g. "August 17" or "Monday, August 17") without normalizing to a strict date format, '
   + 'since it is often approximate. If a field is genuinely not present anywhere in the text, use null.';
+
+// Format a Date as YYYY-MM-DD (local), matching the sheet's timestamp format.
+function formatYMD(date) {
+  if (!date) return '';
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + d;
+}
 
 function normalizeNameForMatch(name) {
   return (name || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
@@ -103,8 +112,13 @@ async function runZelleBackfill(discordClient, onProgress) {
     const extracted = await extractJSON(ZELLE_EXTRACTION_PROMPT, confirmedMessages[i].content);
     if (!extracted || !extracted.customerName || extracted.amount == null) continue;
 
+    // Zelle confirmations are posted when the payment is added to revenue, so
+    // the message's sent date is the transaction date. Use it whenever the
+    // extractor didn't pull an explicit date from the message text.
+    const messageDate = formatYMD(confirmedMessages[i].createdAt);
+
     await appendRows([{
-      timestamp: extracted.date || '',
+      timestamp: extracted.date || messageDate,
       customerName: extracted.customerName,
       amount: extracted.amount,
       productName: extracted.productName || '',
@@ -168,24 +182,27 @@ async function runMatchBackfill(onProgress) {
   if (onProgress) await onProgress('Found ' + clientSetups.length + ' client records. Reading payment rows...');
   const existingRows = await getExistingRows();
 
-  let enriched = 0;
-  let checked = 0;
+  // Collect all matches first (no API writes here), then flush them in one
+  // batched request. Writing one request per row blows the Sheets
+  // 60-per-minute write quota on a tab this large (~11k rows).
+  const pending = [];
   for (let i = 0; i < existingRows.length; i++) {
     const row = existingRows[i];
-    checked = checked + 1;
     if (!needsEnrichment(row)) continue;
 
     const match = findBestClientMatch(row.customerName, row.customerEmail, clientSetups);
     if (match) {
-      await updateRowEnrichment(row.rowNumber, match);
-      enriched = enriched + 1;
-      if (onProgress && enriched % 5 === 0) {
-        await onProgress('Matching: enriched ' + enriched + ' rows so far (checked ' + checked + '/' + existingRows.length + ')...');
+      pending.push({ rowNumber: row.rowNumber, enrichment: match });
+      if (onProgress && pending.length % 20 === 0) {
+        await onProgress('Matched ' + pending.length + ' rows so far (checked ' + (i + 1) + '/' + existingRows.length + ')...');
       }
     }
   }
 
-  return { totalRows: existingRows.length, enriched: enriched };
+  if (onProgress) await onProgress('Found ' + pending.length + ' rows to enrich. Writing in batched requests...');
+  await updateRowEnrichmentBatch(pending, onProgress);
+
+  return { totalRows: existingRows.length, enriched: pending.length };
 }
 
 module.exports = {

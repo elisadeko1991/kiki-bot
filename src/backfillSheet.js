@@ -87,6 +87,44 @@ async function updateRowEnrichment(rowNumber, enrichment) {
   });
 }
 
+// Batched enrichment writer. Collapses many per-row updates into a single
+// values.batchUpdate request (chunked) so we don't blow the Sheets
+// 60-writes-per-minute-per-user quota, which is what crashed the one-request-
+// per-row approach. Each chunk is ONE API write regardless of row count.
+async function updateRowEnrichmentBatch(updates, onProgress) {
+  const sheetId = process.env.GOOGLE_SHEET_ID;
+  const CHUNK = 500;
+  let done = 0;
+
+  for (let start = 0; start < updates.length; start += CHUNK) {
+    const slice = updates.slice(start, start + CHUNK);
+    const data = slice.map((u) => ({
+      range: "'" + TAB_NAME + "'!" + ENRICHMENT_START_COL + u.rowNumber + ':P' + u.rowNumber,
+      values: [[
+        u.enrichment.packageSelected || '',
+        u.enrichment.targetAreas || '',
+        u.enrichment.states || '',
+        u.enrichment.numberOfLeads || '',
+        u.enrichment.typesOfLeads || '',
+        u.enrichment.startDate || '',
+      ]],
+    }));
+
+    await withRetry(async () => {
+      const sheets = getSheetsClient();
+      return sheets.spreadsheets.values.batchUpdate({
+        spreadsheetId: sheetId,
+        requestBody: { valueInputOption: 'USER_ENTERED', data: data },
+      });
+    });
+
+    done += slice.length;
+    if (onProgress) await onProgress('Wrote ' + done + '/' + updates.length + ' enrichment updates...');
+  }
+
+  return updates.length;
+}
+
 async function appendRows(rows) {
   const sheetId = process.env.GOOGLE_SHEET_ID;
 
@@ -127,5 +165,6 @@ module.exports = {
   getExistingRows: getExistingRows,
   needsEnrichment: needsEnrichment,
   updateRowEnrichment: updateRowEnrichment,
+  updateRowEnrichmentBatch: updateRowEnrichmentBatch,
   appendRows: appendRows,
 };
