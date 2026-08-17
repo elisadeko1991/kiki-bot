@@ -7,6 +7,7 @@ const { fetchAllPayments } = require('./payraClient');
 const { appendNewPayments } = require('./googleSheets');
 const { generateDailyReport, formatReportEmbed } = require('./paymentReport');
 const { scheduleDaily } = require('./scheduler');
+const { runBackfill } = require('./paymentBackfill');
 
 const PAYMENT_REPORT_CHANNEL_ID = process.env.PAYMENT_REPORT_CHANNEL_ID;
 const REPORT_TIMEZONE = 'America/Chicago';
@@ -32,6 +33,12 @@ function splitMessage(text, limit) {
   return chunks.length ? chunks : [text];
 }
 
+/**
+ * Groups incoming records into ~windowDays-sized chunks (by payment date,
+ * not by API page) and flushes each chunk once the window is exceeded.
+ * This is separate from the API's own page size and the rate-limit delay
+ * between calls — this only controls how often we write to the sheet.
+ */
 function createDateWindowBatcher(windowDays, onFlush) {
   let buffer = [];
   let windowStartDate = null;
@@ -150,7 +157,7 @@ function start() {
         let runningTotalAdded = 0;
         let runningTotalSkipped = 0;
         let flushCount = 0;
-        const WINDOW_DAYS = 60;
+        const WINDOW_DAYS = 60; // roughly 2 months
 
         const flushBatch = async (records) => {
           flushCount = flushCount + 1;
@@ -212,7 +219,7 @@ function start() {
         let report = 'Raw structure of last 10 messages:\n\n';
         let count = 0;
         recent.forEach((m) => {
-          if (count >= 5) return;
+          if (count >= 5) return; // keep it short enough to fit a Discord message
           count = count + 1;
           report += '--- Message from ' + m.author.username + ' (id: ' + m.author.id + ') ---\n';
           report += 'content: ' + JSON.stringify(m.content).slice(0, 300) + '\n';
@@ -262,7 +269,7 @@ function start() {
         let count = 0;
 
         recent.forEach((m) => {
-          if (count >= 5) return;
+          if (count >= 5) return; // keep it short
           if (filterUserId && m.author.id !== filterUserId) return;
           count = count + 1;
           report += '--- Message from ' + m.author.username + ' (id: ' + m.author.id + ') ---\n';
@@ -296,6 +303,73 @@ function start() {
       return;
     }
 
+    if (contentWithoutMention.toLowerCase().startsWith('!backfill-payments')) {
+      if (message.author.id !== process.env.ELISA_DISCORD_USER_ID) {
+        await message.reply("Only Elisa can run the backfill.");
+        return;
+      }
+
+      const isDryRun = contentWithoutMention.toLowerCase().includes('dry-run');
+
+      await message.reply(
+        (isDryRun ? '**DRY RUN** — ' : '') + 'Starting the full payment backfill. This scans full channel history in both channels '
+        + 'plus runs extraction on every matching message, so it will take a while. '
+        + 'I\'ll post an update roughly every minute.'
+      );
+
+      // Heartbeat: post a status line every 60s regardless of what stage
+      // we're actually in, using whatever the latest status string is.
+      let latestStatus = 'Starting...';
+      let stillRunning = true;
+      const heartbeat = setInterval(async () => {
+        if (!stillRunning) return;
+        try {
+          await message.channel.send('⏳ Still working — ' + latestStatus);
+        } catch (err) {
+          console.error('[discord] Heartbeat send failed:', err.message);
+        }
+      }, 60000);
+
+      try {
+        const report = await runBackfill(discordClient, isDryRun, async (status) => {
+          latestStatus = status;
+        });
+
+        stillRunning = false;
+        clearInterval(heartbeat);
+
+        let summary = (isDryRun ? '**DRY RUN COMPLETE — nothing was written**\n\n' : '**Backfill complete**\n\n')
+          + 'Zelle payments found: ' + report.zellePaymentsFound + '\n'
+          + 'Client setup records found: ' + report.clientSetupsFound + '\n'
+          + 'Existing rows enriched: ' + report.rowsEnriched + '\n'
+          + 'New rows ' + (isDryRun ? 'that would be added' : 'added') + ': ' + report.rowsAppended;
+
+        if (report.unmatchedZelle.length > 0) {
+          summary += '\n\nNo client match found for: ' + report.unmatchedZelle.slice(0, 15).join(', ')
+            + (report.unmatchedZelle.length > 15 ? ' (+' + (report.unmatchedZelle.length - 15) + ' more)' : '');
+        }
+
+        await message.channel.send(summary);
+
+        if (isDryRun && report.newRowsPreview && report.newRowsPreview.length > 0) {
+          let preview = '**Preview of new rows (first 10):**\n```\n';
+          const toShow = report.newRowsPreview.slice(0, 10);
+          for (let i = 0; i < toShow.length; i++) {
+            const r = toShow[i];
+            preview += (r.timestamp || '?') + ' | ' + r.customerName + ' | $' + r.amount + ' | ' + (r.packageSelected || 'no match') + '\n';
+          }
+          preview += '```';
+          await message.channel.send(preview);
+        }
+      } catch (err) {
+        stillRunning = false;
+        clearInterval(heartbeat);
+        console.error('[discord] !backfill-payments failed:', err.message);
+        await message.reply("Backfill failed — " + err.message + (isDryRun ? '' : ' (Anything already written before this error is safe.)'));
+      }
+      return;
+    }
+
     if (contentWithoutMention.toLowerCase().startsWith('!payment-report')) {
       if (message.author.id !== process.env.ELISA_DISCORD_USER_ID) {
         await message.reply("Only Elisa can run the payment report manually.");
@@ -314,6 +388,8 @@ function start() {
 
     const history = appendHistory(message.channelId, 'user', message.content);
 
+    // If this message is a reply to an earlier one, pull the original in as
+    // context — otherwise "what's the update on this?" has nothing to point at.
     let repliedToKiki = false;
     if (message.reference) {
       try {
@@ -326,6 +402,10 @@ function start() {
       }
     }
 
+    // Only actually respond if Kiki was tagged, or this is a direct reply to
+    // one of Kiki's own messages. Otherwise, stay silent but keep the message
+    // in history above — so Kiki still has full context for when it IS asked
+    // something, without replying to every unrelated conversation in the channel.
     const wasMentioned = discordClient && message.mentions.users.has(discordClient.user.id);
     if (!wasMentioned && !repliedToKiki) {
       return;
