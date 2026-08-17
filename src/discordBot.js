@@ -7,7 +7,7 @@ const { fetchAllPayments } = require('./payraClient');
 const { appendNewPayments } = require('./googleSheets');
 const { generateDailyReport, formatReportEmbed } = require('./paymentReport');
 const { scheduleDaily } = require('./scheduler');
-const { runBackfill } = require('./paymentBackfill');
+const { runZelleBackfill, runClientsBackfill, runMatchBackfill } = require('./paymentBackfill');
 
 const PAYMENT_REPORT_CHANNEL_ID = process.env.PAYMENT_REPORT_CHANNEL_ID;
 const REPORT_TIMEZONE = 'America/Chicago';
@@ -303,70 +303,72 @@ function start() {
       return;
     }
 
-    if (contentWithoutMention.toLowerCase().startsWith('!backfill-payments')) {
+    if (contentWithoutMention.toLowerCase().startsWith('!backfill-zelle')) {
       if (message.author.id !== process.env.ELISA_DISCORD_USER_ID) {
-        await message.reply("Only Elisa can run the backfill.");
+        await message.reply("Only Elisa can run this.");
         return;
       }
-
-      const isDryRun = contentWithoutMention.toLowerCase().includes('dry-run');
-
-      await message.reply(
-        (isDryRun ? '**DRY RUN** — ' : '') + 'Starting the full payment backfill. This scans full channel history in both channels '
-        + 'plus runs extraction on every matching message, so it will take a while. '
-        + 'I\'ll post an update roughly every minute.'
-      );
-
-      // Heartbeat: post a status line every 60s regardless of what stage
-      // we're actually in, using whatever the latest status string is.
+      await message.reply('Step 1: scanning Zelle channel and writing payments directly to the sheet as they\'re found...');
       let latestStatus = 'Starting...';
       let stillRunning = true;
       const heartbeat = setInterval(async () => {
         if (!stillRunning) return;
-        try {
-          await message.channel.send('⏳ Still working — ' + latestStatus);
-        } catch (err) {
-          console.error('[discord] Heartbeat send failed:', err.message);
-        }
+        try { await message.channel.send('⏳ Still working — ' + latestStatus); } catch (e) {}
       }, 60000);
-
       try {
-        const report = await runBackfill(discordClient, isDryRun, async (status) => {
-          latestStatus = status;
-        });
-
+        const result = await runZelleBackfill(discordClient, async (status) => { latestStatus = status; });
         stillRunning = false;
         clearInterval(heartbeat);
-
-        let summary = (isDryRun ? '**DRY RUN COMPLETE — nothing was written**\n\n' : '**Backfill complete**\n\n')
-          + 'Zelle payments found: ' + report.zellePaymentsFound + '\n'
-          + 'Client setup records found: ' + report.clientSetupsFound + '\n'
-          + 'Existing rows enriched: ' + report.rowsEnriched + '\n'
-          + 'New rows ' + (isDryRun ? 'that would be added' : 'added') + ': ' + report.rowsAppended;
-
-        if (report.unmatchedZelle.length > 0) {
-          summary += '\n\nNo client match found for: ' + report.unmatchedZelle.slice(0, 15).join(', ')
-            + (report.unmatchedZelle.length > 15 ? ' (+' + (report.unmatchedZelle.length - 15) + ' more)' : '');
-        }
-
-        await message.channel.send(summary);
-
-        if (isDryRun && report.newRowsPreview && report.newRowsPreview.length > 0) {
-          let preview = '**Preview of new rows (first 10):**\n```\n';
-          const toShow = report.newRowsPreview.slice(0, 10);
-          for (let i = 0; i < toShow.length; i++) {
-            const r = toShow[i];
-            preview += (r.timestamp || '?') + ' | ' + r.customerName + ' | $' + r.amount + ' | ' + (r.packageSelected || 'no match') + '\n';
-          }
-          preview += '```';
-          await message.channel.send(preview);
-        }
+        await message.channel.send('**Zelle backfill complete.** Found ' + result.found + ' confirmed payments, wrote ' + result.written + ' rows.');
       } catch (err) {
         stillRunning = false;
         clearInterval(heartbeat);
-        console.error('[discord] !backfill-payments failed:', err.message);
-        console.error('[discord] Full stack trace:', err.stack);
-        await message.reply("Backfill failed — " + err.message + (isDryRun ? '' : ' (Anything already written before this error is safe.)'));
+        console.error('[discord] !backfill-zelle failed:', err.message, err.stack);
+        await message.reply("Failed — " + err.message + " (Rows already written before this error are safe.)");
+      }
+      return;
+    }
+
+    if (contentWithoutMention.toLowerCase().startsWith('!backfill-clients')) {
+      if (message.author.id !== process.env.ELISA_DISCORD_USER_ID) {
+        await message.reply("Only Elisa can run this.");
+        return;
+      }
+      await message.reply('Step 2: scanning client setup channel and writing to "Backfill Clients" as records are found...');
+      let latestStatus = 'Starting...';
+      let stillRunning = true;
+      const heartbeat = setInterval(async () => {
+        if (!stillRunning) return;
+        try { await message.channel.send('⏳ Still working — ' + latestStatus); } catch (e) {}
+      }, 60000);
+      try {
+        const result = await runClientsBackfill(discordClient, async (status) => { latestStatus = status; });
+        stillRunning = false;
+        clearInterval(heartbeat);
+        await message.channel.send('**Clients backfill complete.** Found ' + result.found + ' setup messages, wrote ' + result.written + ' rows.');
+      } catch (err) {
+        stillRunning = false;
+        clearInterval(heartbeat);
+        console.error('[discord] !backfill-clients failed:', err.message, err.stack);
+        await message.reply("Failed — " + err.message + " (Rows already written before this error are safe.)");
+      }
+      return;
+    }
+
+    if (contentWithoutMention.toLowerCase().startsWith('!backfill-match')) {
+      if (message.author.id !== process.env.ELISA_DISCORD_USER_ID) {
+        await message.reply("Only Elisa can run this.");
+        return;
+      }
+      await message.reply('Step 3: matching clients to payments and filling in enrichment columns — this is pure sheet reading/writing, no Discord scanning, should be fast...');
+      try {
+        const result = await runMatchBackfill(async (status) => {
+          await message.channel.send(status);
+        });
+        await message.channel.send('**Matching complete.** Checked ' + result.totalRows + ' payment rows, enriched ' + result.enriched + '.');
+      } catch (err) {
+        console.error('[discord] !backfill-match failed:', err.message, err.stack);
+        await message.reply("Failed — " + err.message);
       }
       return;
     }

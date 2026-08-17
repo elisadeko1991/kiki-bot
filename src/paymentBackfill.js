@@ -1,6 +1,7 @@
 require('dotenv').config();
 const { extractJSON } = require('./extractor');
 const { getExistingRows, needsEnrichment, updateRowEnrichment, appendRows } = require('./backfillSheet');
+const { appendClientRows, getAllClientRows } = require('./clientsSheet');
 
 const ZELLE_CHANNEL_ID = '1263960214126854174';
 const ZELLE_USER_ID = '1505731170585935872';
@@ -64,19 +65,59 @@ async function fetchAllChannelMessages(channel, onProgress) {
       lastId = m.id;
     });
 
-    if (onProgress) {
-      await onProgress(allMessages.length);
-    }
-
+    if (onProgress) await onProgress(allMessages.length);
     if (messages.size < 100) break;
   }
 
   return allMessages;
 }
 
-/** Extracts every "Agent Set Up" client record. Must run before anything
- * else, since both enrichment and Zelle matching depend on this data. */
-async function extractClientSetups(discordClient, onProgress) {
+/**
+ * STEP 1: Scan the Zelle channel, extract each confirmed payment, and write
+ * each one straight to "Backfill: Successful Payments & Clients" — no
+ * matching, no dependency on the other channel. Fully independent.
+ */
+async function runZelleBackfill(discordClient, onProgress) {
+  const channel = await discordClient.channels.fetch(ZELLE_CHANNEL_ID);
+  const allMessages = await fetchAllChannelMessages(channel, async (count) => {
+    if (onProgress) await onProgress('Zelle channel: ' + count + ' messages scanned so far...');
+  });
+
+  const confirmedMessages = allMessages.filter((m) => {
+    return m.author.id === ZELLE_USER_ID && m.content.includes('✅ Added to revenue');
+  });
+
+  if (onProgress) await onProgress('Found ' + confirmedMessages.length + ' confirmed Zelle payments — extracting and writing each one now...');
+
+  let written = 0;
+  for (let i = 0; i < confirmedMessages.length; i++) {
+    const extracted = await extractJSON(ZELLE_EXTRACTION_PROMPT, confirmedMessages[i].content);
+    if (!extracted || !extracted.customerName || extracted.amount == null) continue;
+
+    await appendRows([{
+      timestamp: extracted.date || '',
+      customerName: extracted.customerName,
+      amount: extracted.amount,
+      productName: extracted.productName || '',
+      status: 'Confirmed',
+      paymentType: 'Zelle',
+    }]);
+    written = written + 1;
+
+    if (onProgress && written % 3 === 0) {
+      await onProgress('Zelle: ' + written + '/' + confirmedMessages.length + ' payments written to the sheet...');
+    }
+  }
+
+  return { found: confirmedMessages.length, written: written };
+}
+
+/**
+ * STEP 2: Scan the client-setup channel, extract each "Agent Set Up" record,
+ * and write each one straight to the "Backfill Clients" tab. Independent —
+ * doesn't touch the payments sheet at all.
+ */
+async function runClientsBackfill(discordClient, onProgress) {
   const channel = await discordClient.channels.fetch(CLIENT_SETUP_CHANNEL_ID);
   const allMessages = await fetchAllChannelMessages(channel, async (count) => {
     if (onProgress) await onProgress('Client setup channel: ' + count + ' messages scanned so far...');
@@ -86,117 +127,60 @@ async function extractClientSetups(discordClient, onProgress) {
     return m.embeds && m.embeds.length > 0 && m.embeds[0].title && m.embeds[0].title.indexOf('Agent Set Up') === 0;
   });
 
-  if (onProgress) await onProgress('Client setups: found ' + setupMessages.length + ' setup messages — extracting details now...');
+  if (onProgress) await onProgress('Found ' + setupMessages.length + ' client setup messages — extracting and writing each one now...');
 
-  const setups = [];
+  let written = 0;
   for (let i = 0; i < setupMessages.length; i++) {
     const embed = setupMessages[i].embeds[0];
     const text = (embed.title || '') + '\n' + (embed.description || '');
     const extracted = await extractJSON(CLIENT_SETUP_EXTRACTION_PROMPT, text);
-    if (extracted && extracted.name) {
-      setups.push(extracted);
-    }
-    if (onProgress && (i + 1) % 5 === 0) {
-      await onProgress('Client setups: extracted ' + (i + 1) + '/' + setupMessages.length + ' records...');
+    if (!extracted || !extracted.name) continue;
+
+    await appendClientRows([extracted]);
+    written = written + 1;
+
+    if (onProgress && written % 3 === 0) {
+      await onProgress('Client setups: ' + written + '/' + setupMessages.length + ' records written to the sheet...');
     }
   }
-  return setups;
-}
 
-async function fetchConfirmedZelleMessages(discordClient, onProgress) {
-  const channel = await discordClient.channels.fetch(ZELLE_CHANNEL_ID);
-  const allMessages = await fetchAllChannelMessages(channel, async (count) => {
-    if (onProgress) await onProgress('Zelle channel: ' + count + ' messages scanned so far...');
-  });
-
-  return allMessages.filter((m) => {
-    return m.author.id === ZELLE_USER_ID && m.content.includes('✅ Added to revenue');
-  });
+  return { found: setupMessages.length, written: written };
 }
 
 /**
- * Full pipeline, rewritten to write incrementally:
- *   1. Extract all client setups first (needed for every match below).
- *   2. Enrich existing sheet rows one at a time — fast, no more API calls needed.
- *   3. Process each confirmed Zelle message one at a time: extract, match,
- *      write immediately — so partial progress is saved even if interrupted.
- * dryRun=true skips all writes and just returns what would have happened.
+ * STEP 3: Pure sheet-to-sheet matching — reads both tabs (no Discord
+ * scanning, no Claude calls), matches payments to clients, and fills in the
+ * enrichment columns on matching payment rows. Fast and safe to re-run.
  */
-async function runBackfill(discordClient, dryRun, onProgress) {
-  const report = { zellePaymentsFound: 0, clientSetupsFound: 0, rowsEnriched: 0, rowsAppended: 0, unmatchedZelle: [] };
+async function runMatchBackfill(onProgress) {
+  if (onProgress) await onProgress('Reading client records from Backfill Clients...');
+  const clientSetups = await getAllClientRows();
 
-  if (onProgress) await onProgress('Scanning client setup channel (this runs first — everything else matches against it)...');
-  const clientSetups = await extractClientSetups(discordClient, onProgress);
-  report.clientSetupsFound = clientSetups.length;
-
-  if (onProgress) await onProgress('Found ' + clientSetups.length + ' client setup records. Enriching existing sheet rows...');
-
+  if (onProgress) await onProgress('Found ' + clientSetups.length + ' client records. Reading payment rows...');
   const existingRows = await getExistingRows();
-  let enrichedSoFar = 0;
+
+  let enriched = 0;
+  let checked = 0;
   for (let i = 0; i < existingRows.length; i++) {
     const row = existingRows[i];
+    checked = checked + 1;
     if (!needsEnrichment(row)) continue;
 
     const match = findBestClientMatch(row.customerName, row.customerEmail, clientSetups);
     if (match) {
-      if (!dryRun) {
-        await updateRowEnrichment(row.rowNumber, match);
-      }
-      enrichedSoFar = enrichedSoFar + 1;
-      if (onProgress && enrichedSoFar % 5 === 0) {
-        await onProgress('Enrichment: updated ' + enrichedSoFar + ' existing rows so far...');
+      await updateRowEnrichment(row.rowNumber, match);
+      enriched = enriched + 1;
+      if (onProgress && enriched % 5 === 0) {
+        await onProgress('Matching: enriched ' + enriched + ' rows so far (checked ' + checked + '/' + existingRows.length + ')...');
       }
     }
   }
-  report.rowsEnriched = enrichedSoFar;
 
-  if (onProgress) await onProgress('Enriched ' + enrichedSoFar + ' existing rows. Scanning Zelle payment channel...');
-
-  const confirmedZelleMessages = await fetchConfirmedZelleMessages(discordClient, onProgress);
-  report.zellePaymentsFound = confirmedZelleMessages.length;
-
-  if (onProgress) await onProgress('Found ' + confirmedZelleMessages.length + ' confirmed Zelle payments — extracting and writing each one now...');
-
-  let appendedSoFar = 0;
-  const newRowsPreview = [];
-  for (let i = 0; i < confirmedZelleMessages.length; i++) {
-    const extracted = await extractJSON(ZELLE_EXTRACTION_PROMPT, confirmedZelleMessages[i].content);
-    if (!extracted || !extracted.customerName || extracted.amount == null) continue;
-
-    const match = findBestClientMatch(extracted.customerName, null, clientSetups);
-    if (!match) report.unmatchedZelle.push(extracted.customerName);
-
-    const row = {
-      timestamp: extracted.date || '',
-      customerName: extracted.customerName,
-      customerEmail: match ? match.email : '',
-      amount: extracted.amount,
-      productName: extracted.productName || '',
-      status: 'Confirmed',
-      paymentType: 'Zelle',
-      packageSelected: match ? match.packageSelected : '',
-      targetAreas: match ? match.targetAreas : '',
-      states: match ? match.states : '',
-      numberOfLeads: match ? match.numberOfLeads : '',
-      typesOfLeads: match ? match.typesOfLeads : '',
-      startDate: match ? match.startDate : '',
-    };
-
-    if (newRowsPreview.length < 10) newRowsPreview.push(row);
-
-    if (!dryRun) {
-      await appendRows([row]); // one row at a time — real progress lands in the sheet immediately
-    }
-    appendedSoFar = appendedSoFar + 1;
-
-    if (onProgress && appendedSoFar % 3 === 0) {
-      await onProgress('Zelle: ' + appendedSoFar + '/' + confirmedZelleMessages.length + ' payments ' + (dryRun ? 'processed' : 'written to the sheet') + '...');
-    }
-  }
-  report.rowsAppended = appendedSoFar;
-  report.newRowsPreview = newRowsPreview;
-
-  return report;
+  return { totalRows: existingRows.length, enriched: enriched };
 }
 
-module.exports = { runBackfill: runBackfill };
+module.exports = {
+  runZelleBackfill: runZelleBackfill,
+  runClientsBackfill: runClientsBackfill,
+  runMatchBackfill: runMatchBackfill,
+};
