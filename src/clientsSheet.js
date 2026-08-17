@@ -9,18 +9,21 @@ const HEADER_ROW = [
   'States', 'Number of Leads', 'Types of Leads', 'Start Date',
 ];
 
-function getAuthClient() {
+let cachedSheetsClient = null;
+
+function getSheetsClient() {
+  if (cachedSheetsClient) return cachedSheetsClient;
+
   const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
   const rawKey = process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY;
   if (!email || !rawKey) {
     throw new Error('Missing GOOGLE_SERVICE_ACCOUNT_EMAIL or GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY.');
   }
   const privateKey = rawKey.replace(/\\n/g, '\n');
-  return new google.auth.JWT(email, null, privateKey, ['https://www.googleapis.com/auth/spreadsheets']);
-}
+  const auth = new google.auth.JWT(email, null, privateKey, ['https://www.googleapis.com/auth/spreadsheets']);
 
-function getSheetsClient() {
-  return google.sheets({ version: 'v4', auth: getAuthClient() });
+  cachedSheetsClient = google.sheets({ version: 'v4', auth: auth });
+  return cachedSheetsClient;
 }
 
 function wait(ms) {
@@ -32,12 +35,12 @@ async function withRetry(fn) {
     return await fn();
   } catch (err) {
     console.error('[clientsSheet] Call failed, retrying once in 5s:', err.message);
+    cachedSheetsClient = null;
     await wait(5000);
     return await fn();
   }
 }
 
-/** Appends client setup rows to the dedicated "Backfill Clients" tab, adding the header if it's empty. */
 async function appendClientRows(rows) {
   const sheetId = process.env.GOOGLE_SHEET_ID;
 
@@ -71,7 +74,6 @@ async function appendClientRows(rows) {
   return rowsToAppend.length;
 }
 
-/** Reads every client record already saved in the "Backfill Clients" tab. */
 async function getAllClientRows() {
   const sheetId = process.env.GOOGLE_SHEET_ID;
 

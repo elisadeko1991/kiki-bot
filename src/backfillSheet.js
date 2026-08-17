@@ -12,40 +12,42 @@ const HEADER_ROW = [
   'Number of Leads', 'Types of Leads', 'Start Date',
 ];
 
-function getAuthClient() {
+// Authenticate ONCE and reuse this same client for every call — repeatedly
+// re-parsing the private key on every single request under heavy load is
+// what was triggering intermittent Node/OpenSSL decode failures.
+let cachedSheetsClient = null;
+
+function getSheetsClient() {
+  if (cachedSheetsClient) return cachedSheetsClient;
+
   const email = process.env.GOOGLE_SERVICE_ACCOUNT_EMAIL;
   const rawKey = process.env.GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY;
   if (!email || !rawKey) {
     throw new Error('Missing GOOGLE_SERVICE_ACCOUNT_EMAIL or GOOGLE_SERVICE_ACCOUNT_PRIVATE_KEY.');
   }
   const privateKey = rawKey.replace(/\\n/g, '\n');
-  return new google.auth.JWT(email, null, privateKey, ['https://www.googleapis.com/auth/spreadsheets']);
-}
+  const auth = new google.auth.JWT(email, null, privateKey, ['https://www.googleapis.com/auth/spreadsheets']);
 
-function getSheetsClient() {
-  return google.sheets({ version: 'v4', auth: getAuthClient() });
+  cachedSheetsClient = google.sheets({ version: 'v4', auth: auth });
+  return cachedSheetsClient;
 }
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/**
- * Retries a Sheets API call once after a short delay if it fails — handles
- * occasional transient network/TLS blips (e.g. "DECODER routines" errors)
- * without aborting a long-running backfill over a one-off hiccup.
- */
 async function withRetry(fn) {
   try {
     return await fn();
   } catch (err) {
     console.error('[backfillSheet] Call failed, retrying once in 5s:', err.message);
+    // On retry, force a fresh client in case the cached one is in a bad state.
+    cachedSheetsClient = null;
     await wait(5000);
-    return await fn(); // if it fails again, let the error propagate normally
+    return await fn();
   }
 }
 
-/** Reads every existing row from the sheet, with 1-based row numbers. */
 async function getExistingRows() {
   const sheetId = process.env.GOOGLE_SHEET_ID;
 
