@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node src/index.js",
     "start:slack": "node -e \"require('./src/slackBot').start()\"",
-    "start:discord": "node -e \"require('./src/discordBot').start()\""
+    "start:discord": "node -e \"require('./src/discordBot').start()\"",
+    "backfill": "node scripts/backfill.js"
   },
   "dependencies": {
     "@slack/bolt": "^3.19.0",
