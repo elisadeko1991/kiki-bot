@@ -83,9 +83,18 @@ async function runZelleBackfill(discordClient, onProgress) {
     if (onProgress) await onProgress('Zelle channel: ' + count + ' messages scanned so far...');
   });
 
-  const confirmedMessages = allMessages.filter((m) => {
-    return m.author.id === ZELLE_USER_ID && m.content.includes('✅ Added to revenue');
-  });
+  // Diagnostic counts, in case the filter still misses something unexpected —
+  // shown in the final summary so we can see where messages are getting lost.
+  const fromZelleUser = allMessages.filter((m) => m.author.id === ZELLE_USER_ID);
+  const confirmedMessages = fromZelleUser.filter((m) => m.content.includes('Added to revenue'));
+
+  if (onProgress) {
+    await onProgress(
+      'Diagnostic — total messages: ' + allMessages.length
+      + ', from Zelle user: ' + fromZelleUser.length
+      + ', containing "Added to revenue": ' + confirmedMessages.length
+    );
+  }
 
   if (onProgress) await onProgress('Found ' + confirmedMessages.length + ' confirmed Zelle payments — extracting and writing each one now...');
 
