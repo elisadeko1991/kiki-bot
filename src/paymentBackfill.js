@@ -25,11 +25,14 @@ function normalizeNameForMatch(name) {
   return (name || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
 }
 
+/** True if two names plausibly refer to the same person/company. */
 function namesMatch(a, b) {
   const na = normalizeNameForMatch(a);
   const nb = normalizeNameForMatch(b);
   if (!na || !nb) return false;
   if (na === nb) return true;
+  // Also match if one contains the other as whole words (handles "Jaden Doolittle" vs "Doolittle LLC" partially,
+  // though company-vs-person matches like that will often need manual review regardless).
   return na.includes(nb) || nb.includes(na);
 }
 
@@ -45,11 +48,15 @@ function findBestClientMatch(customerName, customerEmail, clientSetups) {
   return null;
 }
 
+/**
+ * Fetches full channel history (oldest to newest not required — we just
+ * need everything), paginating backward from most recent.
+ */
 async function fetchAllChannelMessages(channel, onProgress) {
   const allMessages = [];
   let lastId = null;
   let batches = 0;
-  const MAX_BATCHES = 200;
+  const MAX_BATCHES = 200; // generous cap for "since the beginning" scans
 
   while (batches < MAX_BATCHES) {
     batches = batches + 1;
@@ -74,13 +81,18 @@ async function fetchAllChannelMessages(channel, onProgress) {
   return allMessages;
 }
 
+/** Scans the Zelle channel and extracts every confirmed payment. */
 async function extractZellePayments(discordClient, onProgress) {
   const channel = await discordClient.channels.fetch(ZELLE_CHANNEL_ID);
-  const allMessages = await fetchAllChannelMessages(channel, onProgress);
+  const allMessages = await fetchAllChannelMessages(channel, async (count) => {
+    if (onProgress) await onProgress('Zelle channel: ' + count + ' messages scanned so far...');
+  });
 
   const confirmedMessages = allMessages.filter((m) => {
     return m.author.id === ZELLE_USER_ID && m.content.includes('✅ Added to revenue');
   });
+
+  if (onProgress) await onProgress('Zelle: found ' + confirmedMessages.length + ' confirmed payment messages — extracting details now...');
 
   const payments = [];
   for (let i = 0; i < confirmedMessages.length; i++) {
@@ -88,17 +100,25 @@ async function extractZellePayments(discordClient, onProgress) {
     if (extracted && extracted.customerName && extracted.amount != null) {
       payments.push(extracted);
     }
+    if (onProgress && (i + 1) % 5 === 0) {
+      await onProgress('Zelle: extracted ' + (i + 1) + '/' + confirmedMessages.length + ' payments...');
+    }
   }
   return payments;
 }
 
+/** Scans the client-setup channel and extracts every "Agent Set Up" record. */
 async function extractClientSetups(discordClient, onProgress) {
   const channel = await discordClient.channels.fetch(CLIENT_SETUP_CHANNEL_ID);
-  const allMessages = await fetchAllChannelMessages(channel, onProgress);
+  const allMessages = await fetchAllChannelMessages(channel, async (count) => {
+    if (onProgress) await onProgress('Client setup channel: ' + count + ' messages scanned so far...');
+  });
 
   const setupMessages = allMessages.filter((m) => {
     return m.embeds && m.embeds.length > 0 && m.embeds[0].title && m.embeds[0].title.indexOf('Agent Set Up') === 0;
   });
+
+  if (onProgress) await onProgress('Client setups: found ' + setupMessages.length + ' setup messages — extracting details now...');
 
   const setups = [];
   for (let i = 0; i < setupMessages.length; i++) {
@@ -108,27 +128,32 @@ async function extractClientSetups(discordClient, onProgress) {
     if (extracted && extracted.name) {
       setups.push(extracted);
     }
+    if (onProgress && (i + 1) % 5 === 0) {
+      await onProgress('Client setups: extracted ' + (i + 1) + '/' + setupMessages.length + ' records...');
+    }
   }
   return setups;
 }
 
+/**
+ * Full pipeline: extract both sources, match, enrich existing sheet rows,
+ * and append new rows for the Zelle payments. dryRun=true skips all writes
+ * and just returns what would have happened.
+ */
 async function runBackfill(discordClient, dryRun, onProgress) {
   const report = { zellePaymentsFound: 0, clientSetupsFound: 0, rowsEnriched: 0, rowsAppended: 0, unmatchedZelle: [] };
 
   if (onProgress) await onProgress('Scanning Zelle payment channel...');
-  const zellePayments = await extractZellePayments(discordClient, async (count) => {
-    if (onProgress) await onProgress('Zelle channel: ' + count + ' messages scanned so far...');
-  });
+  const zellePayments = await extractZellePayments(discordClient, onProgress);
   report.zellePaymentsFound = zellePayments.length;
 
   if (onProgress) await onProgress('Found ' + zellePayments.length + ' confirmed Zelle payments. Scanning client setup channel...');
-  const clientSetups = await extractClientSetups(discordClient, async (count) => {
-    if (onProgress) await onProgress('Client setup channel: ' + count + ' messages scanned so far...');
-  });
+  const clientSetups = await extractClientSetups(discordClient, onProgress);
   report.clientSetupsFound = clientSetups.length;
 
   if (onProgress) await onProgress('Found ' + clientSetups.length + ' client setup records. Matching against existing sheet rows...');
 
+  // 1. Enrich existing rows (manually-added Payra payments) that are missing package/lead details.
   const existingRows = await getExistingRows();
   for (let i = 0; i < existingRows.length; i++) {
     const row = existingRows[i];
@@ -143,6 +168,7 @@ async function runBackfill(discordClient, dryRun, onProgress) {
     }
   }
 
+  // 2. Build and append brand-new rows for the Zelle payments.
   const newRows = zellePayments.map((payment) => {
     const match = findBestClientMatch(payment.customerName, null, clientSetups);
     if (!match) report.unmatchedZelle.push(payment.customerName);
