@@ -44,4 +44,58 @@ function scheduleDaily(hour, minute, timezone, callback) {
   scheduleNext();
 }
 
-module.exports = { scheduleDaily: scheduleDaily, getNextRunTime: getNextRunTime };
+// dayOfWeek uses JS convention: 0 = Sunday, ..., 5 = Friday, 6 = Saturday.
+function getNextWeeklyRunTime(dayOfWeek, hour, minute, timezone) {
+  const now = new Date();
+
+  const tzString = now.toLocaleString('en-US', { timeZone: timezone });
+  const tzAsUtc = new Date(tzString);
+
+  const offsetMs = now.getTime() - tzAsUtc.getTime();
+
+  const daysUntilTarget = (dayOfWeek - tzAsUtc.getDay() + 7) % 7;
+
+  const targetWallClock = new Date(
+    tzAsUtc.getFullYear(),
+    tzAsUtc.getMonth(),
+    tzAsUtc.getDate() + daysUntilTarget,
+    hour,
+    minute,
+    0
+  );
+
+  let targetReal = new Date(targetWallClock.getTime() + offsetMs);
+
+  if (targetReal.getTime() <= now.getTime()) {
+    targetReal = new Date(targetReal.getTime() + 7 * 24 * 60 * 60 * 1000);
+  }
+
+  return targetReal;
+}
+
+function scheduleWeekly(dayOfWeek, hour, minute, timezone, callback) {
+  function scheduleNext() {
+    const nextRun = getNextWeeklyRunTime(dayOfWeek, hour, minute, timezone);
+    const delayMs = nextRun.getTime() - Date.now();
+
+    console.log('[scheduler] Next weekly run at ' + nextRun.toISOString() + ' (in ' + Math.round(delayMs / 60000) + ' minutes)');
+
+    setTimeout(async () => {
+      try {
+        await callback();
+      } catch (err) {
+        console.error('[scheduler] Weekly callback error:', err.message);
+      }
+      scheduleNext();
+    }, delayMs);
+  }
+
+  scheduleNext();
+}
+
+module.exports = {
+  scheduleDaily: scheduleDaily,
+  getNextRunTime: getNextRunTime,
+  scheduleWeekly: scheduleWeekly,
+  getNextWeeklyRunTime: getNextWeeklyRunTime,
+};

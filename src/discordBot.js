@@ -5,12 +5,13 @@ const { getClientByDiscordChannel } = require('../config/clients');
 const { appendNoteToPlaybook } = require('./memoryWriter');
 const { fetchAllPayments } = require('./payraClient');
 const { appendNewPayments } = require('./googleSheets');
-const { generateDailyReport, formatReportEmbed } = require('./paymentReport');
-const { scheduleDaily } = require('./scheduler');
+const { generateDailyReport, formatReportEmbed, generateWeeklyReport, formatWeeklyReportEmbed } = require('./paymentReport');
+const { scheduleDaily, scheduleWeekly } = require('./scheduler');
 const { runZelleBackfill, runClientsBackfill, runMatchBackfill } = require('./paymentBackfill');
 
 const PAYMENT_REPORT_CHANNEL_ID = process.env.PAYMENT_REPORT_CHANNEL_ID;
 const REPORT_TIMEZONE = 'America/Chicago';
+const WEEKLY_REPORT_CHANNEL_ID = '1533177235123601448';
 
 const historyByChannel = new Map();
 const MAX_TURNS = 20;
@@ -108,6 +109,16 @@ function start() {
     } else {
       console.log('Skipping daily payment report scheduler — PAYMENT_REPORT_CHANNEL_ID not set.');
     }
+
+    scheduleWeekly(5, 9, 0, 'America/New_York', async () => {
+      try {
+        const channel = await discordClient.channels.fetch(WEEKLY_REPORT_CHANNEL_ID);
+        const report = await generateWeeklyReport(channel, 'America/New_York');
+        await channel.send({ embeds: [formatWeeklyReportEmbed(report)] });
+      } catch (err) {
+        console.error('[scheduler] Weekly payment report failed:', err.message);
+      }
+    });
   });
 
   client.on('messageCreate', async (message) => {
@@ -384,6 +395,22 @@ function start() {
         await message.channel.send({ embeds: [formatReportEmbed(report)] });
       } catch (err) {
         console.error('[discord] !payment-report failed:', err.message);
+        await message.reply("Report generation failed — " + err.message);
+      }
+      return;
+    }
+
+    if (contentWithoutMention.toLowerCase().startsWith('!weekly-report')) {
+      if (message.author.id !== process.env.ELISA_DISCORD_USER_ID) {
+        await message.reply("Only Elisa can run the weekly report manually.");
+        return;
+      }
+
+      try {
+        const report = await generateWeeklyReport(message.channel, REPORT_TIMEZONE);
+        await message.channel.send({ embeds: [formatWeeklyReportEmbed(report)] });
+      } catch (err) {
+        console.error('[discord] !weekly-report failed:', err.message);
         await message.reply("Report generation failed — " + err.message);
       }
       return;

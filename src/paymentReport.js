@@ -142,6 +142,109 @@ async function generateDailyReport(channel, timezone, overrideDate) {
   };
 }
 
+function getMostRecentWeeklyBoundary(hour, timezone) {
+  const now = new Date();
+  const nowString = now.toLocaleString('en-US', { timeZone: timezone });
+  const nowAsUtc = new Date(nowString);
+  const offsetMs = now.getTime() - nowAsUtc.getTime();
+
+  const FRIDAY = 5;
+  const currentDay = nowAsUtc.getDay();
+  const daysSinceFriday = (currentDay - FRIDAY + 7) % 7;
+
+  let candidateWallClock = new Date(
+    nowAsUtc.getFullYear(), nowAsUtc.getMonth(), nowAsUtc.getDate() - daysSinceFriday, hour, 0, 0
+  );
+  let candidateReal = new Date(candidateWallClock.getTime() + offsetMs);
+
+  if (candidateReal.getTime() > now.getTime()) {
+    candidateWallClock = new Date(
+      candidateWallClock.getFullYear(), candidateWallClock.getMonth(), candidateWallClock.getDate() - 7, hour, 0, 0
+    );
+    candidateReal = new Date(candidateWallClock.getTime() + offsetMs);
+  }
+
+  return candidateReal;
+}
+
+function formatDateInTimezone(date, timezone) {
+  return date.toLocaleString('en-US', {
+    timeZone: timezone, month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
+  });
+}
+
+async function generateWeeklyReport(channel, timezone) {
+  const hour = 9;
+  const end = getMostRecentWeeklyBoundary(hour, timezone);
+  const start = new Date(end.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+  let totalEnglish = 0;
+  let totalSpanish = 0;
+  let countEnglish = 0;
+  let countSpanish = 0;
+  let matchedMessages = 0;
+  const englishByAgent = {};
+  const spanishByAgent = {};
+
+  let lastId = null;
+  const MAX_BATCHES = 50;
+  let batches = 0;
+  let keepGoing = true;
+
+  while (keepGoing && batches < MAX_BATCHES) {
+    batches = batches + 1;
+
+    const options = { limit: 100 };
+    if (lastId) options.before = lastId;
+
+    const messages = await channel.messages.fetch(options);
+    if (messages.size === 0) break;
+
+    let allOlderThanStart = true;
+
+    messages.forEach((message) => {
+      lastId = message.id;
+
+      const created = message.createdAt;
+      if (created < start) return;
+      allOlderThanStart = false;
+      if (created > end) return;
+
+      if (message.author && message.author.id === EXCLUDED_USER_ID) return;
+
+      const searchableText = getSearchableText(message);
+      const parsed = parsePaymentMessage(searchableText);
+
+      if (parsed) {
+        matchedMessages = matchedMessages + 1;
+        if (isSpanish(parsed.paymentType)) {
+          totalSpanish += parsed.amount;
+          countSpanish = countSpanish + 1;
+          addToAgentBucket(spanishByAgent, parsed.agent, parsed.amount);
+        } else {
+          totalEnglish += parsed.amount;
+          countEnglish = countEnglish + 1;
+          addToAgentBucket(englishByAgent, parsed.agent, parsed.amount);
+        }
+      }
+    });
+
+    if (allOlderThanStart) keepGoing = false;
+    if (messages.size < 100) keepGoing = false;
+  }
+
+  return {
+    rangeLabel: formatDateInTimezone(start, timezone) + ' – ' + formatDateInTimezone(end, timezone),
+    totalEnglish: totalEnglish,
+    totalSpanish: totalSpanish,
+    countEnglish: countEnglish,
+    countSpanish: countSpanish,
+    matchedMessages: matchedMessages,
+    englishByAgent: englishByAgent,
+    spanishByAgent: spanishByAgent,
+  };
+}
+
 /** Builds a sorted array of { agent, deals, aov, revenue } from a bucket map. */
 function buildAgentRows(bucket) {
   const rows = Object.keys(bucket).map((agent) => {
@@ -211,6 +314,24 @@ function formatReportEmbed(report) {
   };
 }
 
+function formatWeeklyReportEmbed(report) {
+  const totalAmount = report.totalEnglish + report.totalSpanish;
+  const englishRows = buildAgentRows(report.englishByAgent);
+  const spanishRows = buildAgentRows(report.spanishByAgent);
+
+  const description =
+    '**Total Payments:** $' + totalAmount.toFixed(2) + ' (' + report.matchedMessages + ' payments)\n\n'
+    + formatSection('English', englishRows, report.totalEnglish) + '\n\n'
+    + formatSection('Spanish', spanishRows, report.totalSpanish);
+
+  return {
+    title: 'Weekly Payment Report — ' + report.rangeLabel,
+    color: 5763719,
+    description: description,
+    timestamp: new Date().toISOString(),
+  };
+}
+
 /** Plain-text fallback, kept for logging/debug use. */
 function formatReport(report) {
   return 'Daily Payment Report — ' + report.date + '\n'
@@ -225,6 +346,8 @@ module.exports = {
   isSpanish: isSpanish,
   getTodayInTimezone: getTodayInTimezone,
   generateDailyReport: generateDailyReport,
+  generateWeeklyReport: generateWeeklyReport,
   formatReport: formatReport,
   formatReportEmbed: formatReportEmbed,
+  formatWeeklyReportEmbed: formatWeeklyReportEmbed,
 };
