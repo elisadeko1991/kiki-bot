@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, Partials } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, ButtonBuilder, ActionRowBuilder, ButtonStyle } = require('discord.js');
 const { askClaude } = require('./claude');
 const { getClientByDiscordChannel } = require('../config/clients');
 const { appendNoteToPlaybook } = require('./memoryWriter');
@@ -16,7 +16,78 @@ const WEEKLY_REPORT_CHANNEL_ID = '1533177235123601448';
 const historyByChannel = new Map();
 const MAX_TURNS = 20;
 
+const reportDetailsCache = new Map();
+const REPORT_DETAILS_CACHE_LIMIT = 50;
+
 let discordClient = null;
+
+function cacheReportDetails(details) {
+  const id = Date.now() + '-' + Math.random().toString(36).slice(2);
+  reportDetailsCache.set(id, details);
+  if (reportDetailsCache.size > REPORT_DETAILS_CACHE_LIMIT) {
+    const oldestId = reportDetailsCache.keys().next().value;
+    reportDetailsCache.delete(oldestId);
+  }
+  return id;
+}
+
+function buildReportDetailsRow(id) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId('report-details:' + id).setLabel('Show Details').setStyle(ButtonStyle.Secondary)
+  );
+}
+
+function formatReportDetailsRow(entry) {
+  return entry.agent + ' — $' + entry.amount.toFixed(2) + ' (' + entry.dateOrTimestamp + ')';
+}
+
+/** Groups details into English/Spanish, sorted by amount descending, and
+ * truncates with a "...and N more" note rather than exceeding Discord's
+ * ~2000 char message limit. */
+function formatReportDetails(details) {
+  const english = details.filter((d) => !d.isSpanish).sort((a, b) => b.amount - a.amount);
+  const spanish = details.filter((d) => d.isSpanish).sort((a, b) => b.amount - a.amount);
+  const totalPaymentLines = english.length + spanish.length;
+
+  const lines = ['**English:**'];
+  if (english.length === 0) {
+    lines.push('_no payments_');
+  } else {
+    english.forEach((entry) => lines.push(formatReportDetailsRow(entry)));
+  }
+  lines.push('');
+  lines.push('**Spanish:**');
+  if (spanish.length === 0) {
+    lines.push('_no payments_');
+  } else {
+    spanish.forEach((entry) => lines.push(formatReportDetailsRow(entry)));
+  }
+
+  const LIMIT = 1900;
+  const full = lines.join('\n');
+  if (full.length <= LIMIT) return full;
+
+  const RESERVED_FOR_NOTE = 60;
+  const includedLines = [];
+  let runningLength = 0;
+  let includedPaymentLines = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const addedLength = line.length + 1;
+    if (runningLength + addedLength > LIMIT - RESERVED_FOR_NOTE) break;
+    includedLines.push(line);
+    runningLength += addedLength;
+    if (line.indexOf(' — $') !== -1) includedPaymentLines++;
+  }
+
+  const remaining = totalPaymentLines - includedPaymentLines;
+  let result = includedLines.join('\n');
+  if (remaining > 0) {
+    result += '\n\n...and ' + remaining + ' more';
+  }
+  return result;
+}
 
 function appendHistory(channelId, role, content) {
   const history = historyByChannel.get(channelId) || [];
@@ -101,7 +172,8 @@ function start() {
         try {
           const channel = await discordClient.channels.fetch(PAYMENT_REPORT_CHANNEL_ID);
           const report = await generateDailyReport(channel, REPORT_TIMEZONE);
-          await channel.send({ embeds: [formatReportEmbed(report)] });
+          const detailsId = cacheReportDetails(report.details);
+          await channel.send({ embeds: [formatReportEmbed(report)], components: [buildReportDetailsRow(detailsId)] });
         } catch (err) {
           console.error('[scheduler] Daily payment report failed:', err.message);
         }
@@ -114,7 +186,8 @@ function start() {
       try {
         const channel = await discordClient.channels.fetch(WEEKLY_REPORT_CHANNEL_ID);
         const report = await generateWeeklyReport(channel, 'America/New_York');
-        await channel.send({ embeds: [formatWeeklyReportEmbed(report)] });
+        const detailsId = cacheReportDetails(report.details);
+        await channel.send({ embeds: [formatWeeklyReportEmbed(report)], components: [buildReportDetailsRow(detailsId)] });
       } catch (err) {
         console.error('[scheduler] Weekly payment report failed:', err.message);
       }
@@ -392,7 +465,8 @@ function start() {
 
       try {
         const report = await generateDailyReport(message.channel, REPORT_TIMEZONE);
-        await message.channel.send({ embeds: [formatReportEmbed(report)] });
+        const detailsId = cacheReportDetails(report.details);
+        await message.channel.send({ embeds: [formatReportEmbed(report)], components: [buildReportDetailsRow(detailsId)] });
       } catch (err) {
         console.error('[discord] !payment-report failed:', err.message);
         await message.reply("Report generation failed — " + err.message);
@@ -408,7 +482,8 @@ function start() {
 
       try {
         const report = await generateWeeklyReport(message.channel, REPORT_TIMEZONE);
-        await message.channel.send({ embeds: [formatWeeklyReportEmbed(report)] });
+        const detailsId = cacheReportDetails(report.details);
+        await message.channel.send({ embeds: [formatWeeklyReportEmbed(report)], components: [buildReportDetailsRow(detailsId)] });
       } catch (err) {
         console.error('[discord] !weekly-report failed:', err.message);
         await message.reply("Report generation failed — " + err.message);
@@ -454,6 +529,21 @@ function start() {
       console.error('[discord] ' + clientConfig.label + ' error:', err.message);
       await message.reply("Sorry, I ran into an error processing that — I've logged it.");
     }
+  });
+
+  client.on('interactionCreate', async (interaction) => {
+    if (!interaction.isButton()) return;
+    if (!interaction.customId.startsWith('report-details:')) return;
+
+    const id = interaction.customId.slice('report-details:'.length);
+    const details = reportDetailsCache.get(id);
+
+    if (!details) {
+      await interaction.reply({ content: "This report's details expired — run the command again for a fresh one.", ephemeral: true });
+      return;
+    }
+
+    await interaction.reply({ content: formatReportDetails(details), ephemeral: true });
   });
 
   client.login(process.env.DISCORD_BOT_TOKEN);

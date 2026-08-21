@@ -76,6 +76,7 @@ async function generateDailyReport(channel, timezone, overrideDate) {
   let matchedMessages = 0;
   const englishByAgent = {};
   const spanishByAgent = {};
+  const details = [];
 
   let lastId = null;
   const MAX_BATCHES = 20;
@@ -106,7 +107,8 @@ async function generateDailyReport(channel, timezone, overrideDate) {
       if (parsed) {
         if (parsed.reportingDate === todayStr) {
           matchedMessages = matchedMessages + 1;
-          if (isSpanish(parsed.paymentType)) {
+          const paymentIsSpanish = isSpanish(parsed.paymentType);
+          if (paymentIsSpanish) {
             totalSpanish += parsed.amount;
             countSpanish = countSpanish + 1;
             addToAgentBucket(spanishByAgent, parsed.agent, parsed.amount);
@@ -115,6 +117,12 @@ async function generateDailyReport(channel, timezone, overrideDate) {
             countEnglish = countEnglish + 1;
             addToAgentBucket(englishByAgent, parsed.agent, parsed.amount);
           }
+          details.push({
+            agent: parsed.agent,
+            amount: parsed.amount,
+            isSpanish: paymentIsSpanish,
+            dateOrTimestamp: parsed.reportingDate,
+          });
           oldestInBatchTooOld = false;
         } else if (parsed.reportingDate > todayStr) {
           oldestInBatchTooOld = false;
@@ -139,6 +147,7 @@ async function generateDailyReport(channel, timezone, overrideDate) {
     matchedMessages: matchedMessages,
     englishByAgent: englishByAgent,
     spanishByAgent: spanishByAgent,
+    details: details,
   };
 }
 
@@ -185,6 +194,7 @@ async function generateWeeklyReport(channel, timezone) {
   let matchedMessages = 0;
   const englishByAgent = {};
   const spanishByAgent = {};
+  const details = [];
 
   let lastId = null;
   const MAX_BATCHES = 50;
@@ -217,7 +227,8 @@ async function generateWeeklyReport(channel, timezone) {
 
       if (parsed) {
         matchedMessages = matchedMessages + 1;
-        if (isSpanish(parsed.paymentType)) {
+        const paymentIsSpanish = isSpanish(parsed.paymentType);
+        if (paymentIsSpanish) {
           totalSpanish += parsed.amount;
           countSpanish = countSpanish + 1;
           addToAgentBucket(spanishByAgent, parsed.agent, parsed.amount);
@@ -226,6 +237,12 @@ async function generateWeeklyReport(channel, timezone) {
           countEnglish = countEnglish + 1;
           addToAgentBucket(englishByAgent, parsed.agent, parsed.amount);
         }
+        details.push({
+          agent: parsed.agent,
+          amount: parsed.amount,
+          isSpanish: paymentIsSpanish,
+          dateOrTimestamp: parsed.reportingDate,
+        });
       }
     });
 
@@ -242,6 +259,7 @@ async function generateWeeklyReport(channel, timezone) {
     matchedMessages: matchedMessages,
     englishByAgent: englishByAgent,
     spanishByAgent: spanishByAgent,
+    details: details,
   };
 }
 
